@@ -151,7 +151,7 @@ On entering a newly generated mine floor, a compact `Mine bugs:` notification li
 - Quest Details wiki detection depends on the active objective data exposed by the game and may not recognize every objective layout.
 - Mine bug summaries include only bugs present when the floor finishes loading; bugs revealed later from rocks or other interactions are not included.
 - Long recipe lists are summarized rather than expanded in full.
-- Gift selection searches up to 2,048 states to keep a click bounded. If that limit is reached, the notification says so: the result is the best birthday-first selection found, not a guarantee of the optimal selection.
+- Gift selection has a search limit to avoid long delays. If the notification says that limit was reached, additional gifts may still fit in your backpack.
 - Other mods can register the same hotkeys or change native menus and game data. Remap conflicting keys and test your actual mod combination.
 
 ## Troubleshooting
@@ -166,22 +166,6 @@ Framework errors may also appear in
 `%LOCALAPPDATA%\FieldsOfMistria\mod_data\mmapi\logs\mmapi.log`.
 For installation failures, retain MOMI's error output and include the game,
 MOMI, and mod versions when reporting the problem.
-
-## Development checks
-
-Run the dependency-free regression suite with Node.js 18 or newer:
-
-```powershell
-node --test .\tests\mod-regressions.test.cjs
-```
-
-The suite executes selected JS-compatible GML functions directly with narrow
-game-API stand-ins. It covers selection against an independent exhaustive solver,
-gift rules, transfer safety, clock ownership, visit resets, wiki context, and map
-presentation logic. It does not emulate GameMaker. Also run MOMI's strict
-preflight with compilation enabled against the target game's pristine archive,
-using an absolute mod-folder path. Live-game checks of menu layout, controller
-input, save changes, and mine transitions remain necessary before a release.
 
 ## License
 
