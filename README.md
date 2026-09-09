@@ -7,8 +7,9 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Shows compact cooking or crafting recipe summaries for a hovered item.
 - Lists villagers who like or love the actual hovered item, including its infusion and special-item gift rules.
 - Adds a chest button that grabs one loved gift for each met villager who has not received a gift that day, prioritizing birthdays and available backpack space.
-- Allows ordinary villager conversations and gifting while riding your mount, using the normal controls.
+- Allows ordinary villager conversations, gifting, and Elsie's Gossip while riding your mount, using the normal controls.
 - Copies relevant Fields of Mistria Wiki links for items, villagers, calendar birthdays, quest objectives, Museum wings, and map markers.
+- Reveals names when hovering darkened collection items in all four Museum wings, with individual item wiki links.
 - Shows villager names when hovering known NPC map markers.
 - Displays today's birthdays below the mana meter.
 - Announces legendary fish and very rare bug spawns.
@@ -78,6 +79,17 @@ F7 resolves the current visible context when pressed; it does not copy the last
 item you happened to inspect. A mixed-species bug marker links to the wiki's Bugs
 page; a single-species marker links to that bug.
 
+In the Museum's Archaeology, Fish, Flora, and Insects wings, hover a darkened item
+icon to see its name. Press **F7** over an item icon to copy that item's wiki link,
+whether or not it has been donated. Empty space on the collection page still
+links to the wing. The icons remain darkened until donation; looking up an item
+does not unlock it or change collection progress. **F8** hides only wiki-key
+hints, not these names. Individual Museum item lookup uses the mouse; controller
+navigation continues to select whole sets. Item-specific Museum wiki links
+currently require the game's English language setting. Other languages still
+show localized hover names, but copy the wing page rather than an incorrect
+English wiki URL; the mod does not change your language setting.
+
 While the companion owns a clock pause, **Clock paused** appears below the mana
 meter. Releasing it does not undo a cutscene or another mod's pause. Sleeping,
 crafting, and other scripted time changes are not frozen. Loading a save or
@@ -100,12 +112,16 @@ Select a gift in your toolbar as usual. Ordinary conversations leave you mounted
 the game still handles the dialogue, item consumption, and friendship changes.
 Normal gift restrictions still apply.
 
+Elsie's **Gossip** action also works while mounted using its normal secondary
+interaction control, once her introductory gossip quest is complete. Her daily
+limit, cooldown dialogue, available hints, and gift discoveries remain unchanged.
+
 This feature does not unlock quest turn-ins, dates, proposals, kissing, petting,
 or other special interactions while mounted. A villager waiting for a quest
 turn-in may still require you to dismount before talking. Jumping, dismounting,
 and scripted cutscene transitions keep their normal behavior.
 
-Mounted talking and gifting are enabled by default. To disable both, close the
+Mounted talking, gifting, and Gossip are enabled by default. To disable them, close the
 game, set `"mounted_interactions_enabled": false` in the configuration file below,
 and restart. This setting does not add or change any hotkeys.
 

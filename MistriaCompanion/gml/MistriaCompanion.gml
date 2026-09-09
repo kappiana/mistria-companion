@@ -12,6 +12,7 @@ function __MistriaCompanion_runtime() {
             wiki_title: "",
             wiki_hint_title: "",
             wiki_hints_enabled: true,
+            museum_label: undefined,
             all_bug_markers_enabled: false,
             legendary_day: "",
             legendary_sightings: [],
@@ -65,6 +66,9 @@ function __MistriaCompanion_notify(_text, _duck) {
 
 function MistriaCompanion_reset_save(_ctx) {
     var _runtime = __MistriaCompanion_runtime();
+    var _label = __MistriaCompanion_field(_runtime, "museum_label");
+    if (_label != undefined && !_label.freed) ANCHOR.free_node(_label);
+    _runtime.museum_label = undefined;
     _runtime.clock_paused = false;
     _runtime.cache = {};
     _runtime.recipe_cache = {};
@@ -191,7 +195,10 @@ function __MistriaCompanion_mounted_condition() {
     if (!instance_exists(_npc)) return false;
     if (_npc.npc_id == NpcId.Caldarus && caldarus_is_sleeping()) return false;
 
-    // Mirror only the native talk/gift predicates, without ari_can_talk's mount veto.
+    // Mirror the native predicates without ari_can_talk's mount veto.
+    if (self.gossip) {
+        return QUEST_LOG.completed.contains("gossip_for_elsie");
+    }
     if (!self.gift) {
         return _npc.can_talk() && _npc.my_query_quests().is_empty();
     }
@@ -203,7 +210,7 @@ function __MistriaCompanion_mounted_condition() {
         && npc_is_unlocked(_npc.npc_id);
 }
 
-function __MistriaCompanion_wrap_mounted_interaction(_npc, _interaction, _gift) {
+function __MistriaCompanion_wrap_mounted_interaction(_npc, _interaction, _gift, _gossip=false) {
     if (__MistriaCompanion_field(_interaction, "__mistria_companion_mounted") != undefined) return;
     if (typeof(__MistriaCompanion_field(_interaction, "can_interact_callback")) != "method"
         || typeof(__MistriaCompanion_field(_interaction, "callback")) != "method")
@@ -215,6 +222,7 @@ function __MistriaCompanion_wrap_mounted_interaction(_npc, _interaction, _gift) 
     var _context = {
         npc: _npc,
         gift: _gift,
+        gossip: _gossip,
         original: _interaction.can_interact_callback
     };
     _interaction.__mistria_companion_mounted = _context;
@@ -238,8 +246,10 @@ function __MistriaCompanion_install_mounted_npc(_npc) {
 
     var _talk = undefined;
     var _gift = undefined;
+    var _gossip = undefined;
     var _talk_count = 0;
     var _gift_count = 0;
+    var _gossip_count = 0;
     var _talk_first = -1;
     var _talk_last = -1;
     for (var _index = 0; _index < _count; _index++) {
@@ -257,6 +267,11 @@ function __MistriaCompanion_install_mounted_npc(_npc) {
         } else if (_key == "misc_local/give_item" && _input == InputId.Throw) {
             _gift = _interaction;
             _gift_count++;
+        } else if (_npc.npc_id == NpcId.Elsie && _key == "misc_local/gossip"
+            && _input == InputId.SecondaryInteract)
+        {
+            _gossip = _interaction;
+            _gossip_count++;
         }
     }
     // Caldarus appends a separate sleeping-only Talk after the inherited entries.
@@ -264,6 +279,11 @@ function __MistriaCompanion_install_mounted_npc(_npc) {
         && _talk_first == 0 && _talk_last == _count - 1;
     if (_talk_count == 1 || _caldarus_pair) __MistriaCompanion_wrap_mounted_interaction(_npc, _talk, false);
     if (_gift_count == 1) __MistriaCompanion_wrap_mounted_interaction(_npc, _gift, true);
+    if (_gossip_count == 1) __MistriaCompanion_wrap_mounted_interaction(_npc, _gossip, false, true);
+    if (_npc.npc_id == NpcId.Elsie && _gossip_count != 1) {
+        mmapi_warn_rate_limited("mistria_item_details:mounted_gossip", "mistria_item_details",
+            "Mounted interactions: missing or duplicate Elsie Gossip; leaving gossip unchanged.");
+    }
     if ((_talk_count != 1 && !_caldarus_pair) || _gift_count != 1) {
         mmapi_warn_rate_limited("mistria_item_details:mounted_entries", "mistria_item_details",
             "Mounted interactions: missing or duplicate talk/gift entries; ambiguous entries were left unchanged.");
@@ -812,6 +832,7 @@ function __MistriaCompanion_set_wiki_title(_title) {
 function __MistriaCompanion_resolve_wiki_title() {
     var _runtime = __MistriaCompanion_runtime();
     _runtime.wiki_title = "";
+    __MistriaCompanion_update_museum_label(undefined);
     if (!__MistriaCompanion_ready()) return "";
 
     for (var _index = ANCHOR.open_menus.count() - 1; _index >= 0; _index--) {
@@ -1004,19 +1025,215 @@ function MistriaCompanion_capture_quest_item_context() {
     }
 }
 
+function __MistriaCompanion_museum_warning() {
+    mmapi_warn_rate_limited("mistria_item_details:museum_slots", "mistria_item_details",
+        "Museum item lookup: unsupported collection slots; leaving the native menu unchanged.");
+}
+
+function __MistriaCompanion_museum_wiki_title(_prototype) {
+    if (local_language() != "eng") {
+        mmapi_warn_rate_limited("mistria_item_details:museum_wiki_language", "mistria_item_details",
+            "Museum wiki lookup: English item titles are unavailable in this language; using the wing page.");
+        return "";
+    }
+    var _key = __MistriaCompanion_field(_prototype, "name_key");
+    if (is_string(_key) && _key != "") {
+        var _title = local_get(_key);
+        if (is_string(_title) && _title != "" && _title != _key
+            && _title != "MISSING" && _title != "PLACEHOLDER")
+        {
+            return _title;
+        }
+    }
+    mmapi_warn_rate_limited("mistria_item_details:museum_wiki_name", "mistria_item_details",
+        "Museum wiki lookup: item name unavailable; using the wing page.");
+    return "";
+}
+
+function __MistriaCompanion_museum_slots(_row, _set) {
+    var _ids = __MistriaCompanion_field(_set, "items");
+    var _children = __MistriaCompanion_field(_row, "children");
+    if (!is_array(_ids) || !is_array(_children) || !is_array(ITEM_PROTOTYPES)) {
+        __MistriaCompanion_museum_warning();
+        return [];
+    }
+    var _cached = _row.board_get("mistria_item_details_museum_slots");
+    if (_cached != undefined && array_length(_cached.items) == array_length(_ids)
+        && array_length(_cached.children) == array_length(_children))
+    {
+        var _matches = true;
+        for (var _index = 0; _index < array_length(_ids); _index++) {
+            if (_cached.items[_index] != _ids[_index]) _matches = false;
+        }
+        for (var _index = 0; _index < array_length(_children); _index++) {
+            if (_cached.children[_index] != _children[_index]) _matches = false;
+        }
+        if (_matches) return _cached.slots;
+    }
+
+    var _items = List();
+    for (var _index = 0; _index < array_length(_ids); _index++) {
+        var _id = _ids[_index];
+        if (!is_real(_id) || _id != floor(_id) || _id < 0
+            || _id >= array_length(ITEM_PROTOTYPES) || !is_struct(ITEM_PROTOTYPES[_id]))
+        {
+            __MistriaCompanion_museum_warning();
+            return [];
+        }
+        _items.push(new LiveItem(_id));
+    }
+    // MuseumMenu draws collection icons in this localized order, not set.items order.
+    _items.sort_with(function(_left, _right) {
+        return string_alphanumeric_comparison(_left.get_display_name(), _right.get_display_name());
+    });
+
+    var _icons = [];
+    for (var _index = 0; _index < array_length(_children); _index++) {
+        if (__MistriaCompanion_field(_children[_index], "type") == NodeId.Sprite) {
+            array_push(_icons, _children[_index]);
+        }
+    }
+    // The final sprite is the native collection progress indicator.
+    if (array_length(_icons) != _items.count() + 1) {
+        __MistriaCompanion_museum_warning();
+        return [];
+    }
+    var _slots = [];
+    for (var _index = 0; _index < _items.count(); _index++) {
+        var _item = _items.get(_index);
+        var _node = _icons[_index];
+        if (_node.freed || _node.sprite != _item.get_ui_icon()) {
+            __MistriaCompanion_museum_warning();
+            return [];
+        }
+        array_push(_slots, { node: _node, item: _item });
+    }
+    _row.board_set("mistria_item_details_museum_slots", {
+        items: __MistriaCompanion_copy_array(_ids),
+        children: __MistriaCompanion_copy_array(_children),
+        slots: _slots
+    });
+    return _slots;
+}
+
+function __MistriaCompanion_museum_target() {
+    var _menu = __MistriaCompanion_menu(Menu.Museum);
+    if (_menu == undefined || _menu.hide_requests > 0 || !ANCHOR.in_point_control()
+        || !_menu.canvas.is_unlocked() || !_menu.right_page.get_enabled())
+    {
+        return undefined;
+    }
+    var _row = ANCHOR.current_hovered_node;
+    if (_row == undefined || _row.freed || _row.marked_for_death
+        || _row.pilot != _menu.set_pilot || !_row.is_unlocked() || !_row.is_hovered()
+        || !ANCHOR.point_in_node(_row, MOUSE_GUI_X, MOUSE_GUI_Y)
+        || !ANCHOR.point_in_node(_row.canvas, MOUSE_GUI_X, MOUSE_GUI_Y))
+    {
+        return undefined;
+    }
+    var _tap = __MistriaCompanion_field(__MistriaCompanion_field(_row, "event_callbacks"), "tap");
+    var _args = __MistriaCompanion_field(_tap, "arg_array");
+    var _wings = __MistriaCompanion_field(MUSEUM_DATA, "data");
+    var _wing = _menu.canvas.board_get("selected_wing");
+    if (!is_array(_args) || array_length(_args) < 2 || !is_array(_wings)
+        || !is_real(_wing) || _wing != floor(_wing) || _wing < 0 || _wing >= array_length(_wings))
+    {
+        __MistriaCompanion_museum_warning();
+        return undefined;
+    }
+    var _sets = __MistriaCompanion_field(_wings[_wing], "sets");
+    if (typeof(__MistriaCompanion_field(_sets, "get")) != "method"
+        || _sets.get(_args[1]) != _args[0])
+    {
+        __MistriaCompanion_museum_warning();
+        return undefined;
+    }
+    var _slots = __MistriaCompanion_museum_slots(_row, _args[0]);
+    for (var _index = 0; _index < array_length(_slots); _index++) {
+        var _slot = _slots[_index];
+        var _node = _slot.node;
+        if (_node.freed || _node.marked_for_death || !_node.is_unlocked()
+            || !ANCHOR.point_in_node(_node, MOUSE_GUI_X, MOUSE_GUI_Y)) continue;
+        var _id = _slot.item.item_id;
+        if (_node.sprite != _slot.item.get_ui_icon() || !is_array(MUSEUM_PROGRESS)
+            || _id >= array_length(MUSEUM_PROGRESS)
+            || (MUSEUM_PROGRESS[_id] != true && MUSEUM_PROGRESS[_id] != false))
+        {
+            __MistriaCompanion_museum_warning();
+            return undefined;
+        }
+        return { node: _node, item: _slot.item, donated: MUSEUM_PROGRESS[_id] };
+    }
+    return undefined;
+}
+
+function __MistriaCompanion_update_museum_label(_target) {
+    var _runtime = __MistriaCompanion_runtime();
+    var _menu = __MistriaCompanion_menu(Menu.Museum);
+    var _plate = __MistriaCompanion_field(_runtime, "museum_label");
+    if (_plate != undefined && (_plate.freed || _menu == undefined || _plate.parent != _menu.canvas)) {
+        if (!_plate.freed) ANCHOR.free_node(_plate);
+        _runtime.museum_label = undefined;
+        _plate = undefined;
+    }
+    if (_target == undefined || _target.donated || _menu == undefined || _menu.hide_requests > 0) {
+        if (_plate != undefined) _plate.disable();
+        return;
+    }
+    var _name = _target.item.get_display_name();
+    if (!is_string(_name) || _name == "" || _name == "MISSING" || _name == "PLACEHOLDER"
+        || _name == _target.item.prototype.name_key)
+    {
+        __MistriaCompanion_museum_warning();
+        if (_plate != undefined) _plate.disable();
+        return;
+    }
+    if (_plate == undefined) {
+        // Keep the name outside the scroller's clipped canvas, without taking input.
+        _plate = ANCHOR.nine_slice(_menu.canvas)
+            .set_sprite(spr_ui_tooltip_header_box).set_z(-100);
+        var _text = ANCHOR.text(_plate)
+            .set_xy(4, 4).set_lut(COMMON_LUT, CommonLutIndex.Header)
+            .allow_line_breaks();
+        _plate.board_set("name", _text);
+        _runtime.museum_label = _plate;
+    }
+    var _screen = ANCHOR.screen_canvas.get_size();
+    var _text = _plate.board_get("name");
+    _text.set_ghost_key(_target.item.prototype.name_key)
+        .set_max_width(min(172, _screen.x - 16)).set_text(_name);
+    _text.measure();
+    _plate.set_size(_text.get_width() + 8, _text.get_height() + 8);
+    var _position = ANCHOR.get_screen_position(_target.node);
+    var _origin = ANCHOR.get_screen_position(_menu.canvas);
+    _plate.set_xy(_position.x - _origin.x,
+        _position.y - _origin.y + _target.node.get_height() + 3).enable();
+    _plate.board_set("mistria_item_details_bounds", undefined);
+    __MistriaCompanion_fit_node(_plate);
+}
+
 function MistriaCompanion_capture_museum_wing_context() {
     var _museum = __MistriaCompanion_menu(Menu.Museum);
     if (_museum == undefined || _museum.hide_requests > 0) return;
 
+    var _target = __MistriaCompanion_museum_target();
+    __MistriaCompanion_update_museum_label(_target);
+    if (_target != undefined) {
+        var _item_title = __MistriaCompanion_museum_wiki_title(_target.item.prototype);
+        if (_item_title != "") {
+            __MistriaCompanion_set_wiki_title(_item_title);
+            return;
+        }
+    }
     var _title = "";
-    switch _museum.canvas.board_get("selected_wing") {
+    switch (_museum.canvas.board_get("selected_wing")) {
         case MuseumWing.Archaeology: _title = "Archaeology Wing"; break;
         case MuseumWing.Fish: _title = "Fish Wing"; break;
         case MuseumWing.Flora: _title = "Flora Wing"; break;
         case MuseumWing.Insect: _title = "Insects Wing"; break;
     }
 
-    if (_title != ""
+    if (_title != "" && _museum.right_page.get_enabled() && _museum.canvas.is_unlocked()
         && ANCHOR.point_in_node(_museum.right_body, MOUSE_GUI_X, MOUSE_GUI_Y))
     {
         __MistriaCompanion_set_wiki_title(_title);
@@ -1990,6 +2207,7 @@ function MistriaCompanion_tick() {
     if (!__MistriaCompanion_ready()) {
         _runtime.wiki_title = "";
         _runtime.wiki_hint_title = "";
+        __MistriaCompanion_update_museum_label(undefined);
         return;
     }
     MistriaCompanion_update_mounted_interactions();
@@ -2055,5 +2273,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.39");
+mmapi_mod_declare("mistria_item_details", "1.0.40");
 MistriaCompanion_register();

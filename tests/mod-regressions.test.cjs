@@ -369,6 +369,7 @@ function mountedHarness() {
   const state = {
     mounted: true, playerState: 'MountDefault', paused: false,
     textbox: undefined, sleeping: false, unlocked: true, heldReads: 0,
+    gossipUnlocked: false, gossipQuestReads: 0,
     held: { amount: 2, prototype: { giftable: true, tags: list([]) } },
   };
   const npcs = [];
@@ -397,8 +398,13 @@ function mountedHarness() {
     obj_ari: player,
     PlayerState: { MountDefault: 'MountDefault', MountJump: 'MountJump', Default: 'Default' },
     Menu: { Textbox: 'Textbox' },
-    NpcId: { Caldarus: 999 },
-    InputId: { Interact: 'Interact', Throw: 'Throw' },
+    NpcId: { Caldarus: 999, Elsie: 1000 },
+    InputId: { Interact: 'Interact', Throw: 'Throw', SecondaryInteract: 'SecondaryInteract' },
+    QUEST_LOG: { completed: { contains: key => {
+      assert.equal(key, 'gossip_for_elsie');
+      state.gossipQuestReads++;
+      return state.gossipUnlocked;
+    } } },
     MIST: { running: false },
     non_cutscene_pause: () => state.paused,
     caldarus_is_sleeping: () => state.sleeping,
@@ -453,9 +459,19 @@ function mountedHarness() {
     npcs.push(npc);
     return npc;
   }
+  function addGossip(npc, input = context.InputId.SecondaryInteract) {
+    const gossip = entry(npc, 'gossip', 'misc_local/gossip', input);
+    gossip.can_interact_callback = context.method(npc, () => {
+      assert.equal(context.self, npc);
+      conditions.push({ npc, kind: 'gossip' });
+      return state.gossipUnlocked && !state.mounted;
+    });
+    npc.entries.push(gossip);
+    return gossip;
+  }
   return {
     context, runtime, state, player, npcs, warnings, conditions, actions,
-    makeNpc, entry, interactionList,
+    makeNpc, entry, interactionList, addGossip,
     install: context.__MistriaCompanion_install_mounted_npc,
     update: context.MistriaCompanion_update_mounted_interactions,
   };
@@ -501,6 +517,84 @@ test('mounted ordinary talk preserves can_talk and quest eligibility', () => {
   npc.questsEmpty = true;
   assert.equal(canTalk(), true);
   assert.equal(conditions.length, 0, 'native mount-vetoing predicates are not evaluated in mounted mode');
+});
+
+test('mounted Elsie Gossip keeps its quest unlock and native action, including cooldown responses', () => {
+  const h = mountedHarness();
+  const elsie = h.makeNpc(h.context.NpcId.Elsie);
+  const gossip = h.addGossip(elsie);
+  const before = { ...gossip };
+  h.update();
+  h.update();
+  assert.notEqual(gossip.can_interact_callback, before.can_interact_callback);
+  assert.equal(gossip.callback, before.callback);
+  assert.equal(gossip.input_id, h.context.InputId.SecondaryInteract);
+  assert.equal(gossip.local_key, 'misc_local/gossip');
+  assert.equal(gossip.can_interact_callback(), false, 'the introductory quest still gates Gossip');
+  h.state.gossipUnlocked = true;
+  elsie.talkAllowed = false;
+  elsie.questsEmpty = false;
+  for (const alreadyGossiped of [false, true]) {
+    h.context.ARI.has_gossiped_today = alreadyGossiped;
+    assert.equal(gossip.can_interact_callback(), true, 'Gossip does not inherit ordinary Talk restrictions');
+    assert.equal(gossip.callback(), 'gossip action');
+    assert.equal(h.context.ARI.has_gossiped_today, alreadyGossiped, 'only the native action owns daily state');
+  }
+  assert.equal(h.conditions.length, 0, 'the mount-vetoing native predicate is bypassed only while mounted');
+  assert.equal(h.state.heldReads, 0);
+  assert.equal(h.warnings.length, 0);
+  assert.deepEqual(h.actions.map(action => action.kind), ['gossip', 'gossip']);
+  assert.ok(h.actions.every(action => action.npc === elsie));
+});
+
+test('mounted Elsie Gossip delegates unchanged when off-mount, disabled, or missing the player', () => {
+  for (const mode of ['off-mount', 'disabled', 'missing-player']) {
+    const h = mountedHarness();
+    const elsie = h.makeNpc(h.context.NpcId.Elsie);
+    const gossip = h.addGossip(elsie);
+    const original = gossip.can_interact_callback;
+    h.update();
+    if (mode === 'off-mount') h.state.mounted = false;
+    if (mode === 'disabled') h.runtime.mounted_interactions_enabled = false;
+    if (mode === 'missing-player') h.player.alive = false;
+    for (const unlocked of [false, true]) {
+      h.state.gossipUnlocked = unlocked;
+      assert.equal(gossip.can_interact_callback(), original());
+    }
+    assert.equal(h.state.gossipQuestReads, 0, 'delegation does not run the mod predicate');
+    assert.equal(gossip.__mistria_companion_mounted.original, original);
+  }
+});
+
+test('mounted Gossip wrapping is restricted to one native Elsie secondary interaction', () => {
+  for (const variant of ['other-npc', 'wrong-input', 'duplicate', 'bad-condition', 'bad-action']) {
+    const h = mountedHarness();
+    const npc = h.makeNpc(variant === 'other-npc' ? 1 : h.context.NpcId.Elsie);
+    const gossip = h.addGossip(npc, variant === 'wrong-input' ? h.context.InputId.Interact : undefined);
+    if (variant === 'duplicate') h.addGossip(npc);
+    if (variant === 'bad-condition') gossip.can_interact_callback = undefined;
+    if (variant === 'bad-action') gossip.callback = undefined;
+    const entries = npc.entries.slice(5);
+    const before = entries.map(entry => ({ ...entry }));
+    h.update();
+    assert.deepEqual(entries, before, variant);
+    assert.ok(npc.entries[0].__mistria_companion_mounted);
+    assert.ok(npc.entries[1].__mistria_companion_mounted);
+    assert.equal(h.warnings.length > 0, variant !== 'other-npc', variant);
+  }
+});
+
+test('mounted Elsie Gossip retries late registration without wrapping an entry twice', () => {
+  const h = mountedHarness();
+  const elsie = h.makeNpc(h.context.NpcId.Elsie);
+  h.update();
+  const gossip = h.addGossip(elsie);
+  h.update();
+  const wrapped = gossip.can_interact_callback;
+  h.update();
+  assert.equal(gossip.can_interact_callback, wrapped);
+  h.state.gossipUnlocked = true;
+  assert.equal(gossip.can_interact_callback(), true);
 });
 
 test('mounted Caldarus native talk/gift/sleepTalk layout wraps only ordinary entries and preserves sleeping callbacks', () => {
@@ -586,7 +680,7 @@ test('mounted gift eligibility preserves daily flag, held item, giftability, ban
   assert.equal(held.amount, 2, 'eligibility never consumes an item');
 });
 
-test('mounted talk and gift are blocked by jump, pending FSM change, pause, MIST, textbox, fire breath, or no mount', () => {
+test('mounted talk, gift, and Elsie Gossip are blocked by jump, pending FSM change, pause, MIST, textbox, fire breath, or no mount', () => {
   const cases = [
     ['MountJump', h => { h.state.playerState = h.context.PlayerState.MountJump; }],
     ['other player state', h => { h.state.playerState = h.context.PlayerState.Default; }],
@@ -600,13 +694,17 @@ test('mounted talk and gift are blocked by jump, pending FSM change, pause, MIST
   ];
   for (const [label, block] of cases) {
     const harness = mountedHarness();
-    const npc = harness.makeNpc();
+    const npc = harness.makeNpc(harness.context.NpcId.Elsie);
+    const gossip = harness.addGossip(npc);
+    harness.state.gossipUnlocked = true;
     harness.update();
     assert.equal(harness.context.__MistriaCompanion_mounted_ready(), true);
     block(harness);
     assert.equal(harness.context.__MistriaCompanion_mounted_ready(), false, label);
     assert.equal(npc.entries[0].can_interact_callback(), false, `${label}: talk`);
     assert.equal(npc.entries[1].can_interact_callback(), false, `${label}: gift`);
+    assert.equal(gossip.can_interact_callback(), false, `${label}: gossip`);
+    assert.equal(harness.state.gossipQuestReads, 0);
     assert.equal(harness.conditions.length, 0);
     assert.equal(harness.state.heldReads, 0, 'guards precede held-item access');
   }
@@ -832,6 +930,7 @@ function wikiHarness() {
     __MistriaCompanion_menu: kind => menus[kind],
     __MistriaCompanion_name: prototype => prototype.name,
     __MistriaCompanion_fit_node: () => {},
+    __MistriaCompanion_update_museum_label: () => {},
     MistriaCompanion_capture_npc_context: () => {},
     MistriaCompanion_capture_quest_item_context: () => {},
     MistriaCompanion_capture_museum_wing_context: () => {},
@@ -892,6 +991,303 @@ class Node {
   is_hovered() { return this.hovered ?? false; }
   measure() {}
 }
+
+function museumHarness(wing = 0) {
+  class MuseumNode extends Node {
+    constructor(parent, options = {}) {
+      super();
+      Object.assign(this, { parent, x: 0, y: 0, width: 16, height: 16, unlocked: true }, options);
+      if (parent) parent.children.push(this);
+    }
+    get_enabled() { return this.enabled && (!this.parent || this.parent.get_enabled()); }
+    is_unlocked() { return this.unlocked && this.get_enabled() && (!this.parent || this.parent.is_unlocked()); }
+    get_size() { return { x: this.width, y: this.height }; }
+    get_width() { return this.width; }
+    get_height() { return this.height; }
+    set_size(width, height) { Object.assign(this, { width, height }); return this; }
+    set_z(z) { this.z = z; return this; }
+    set_max_width(maxWidth) { this.maxWidth = maxWidth; return this; }
+    set_ghost_key(key) { this.ghostKey = key; return this; }
+    allow_line_breaks() { return this; }
+    add_x(x) { this.x += x; return this; }
+    add_y(y) { this.y += y; return this; }
+    measure() {
+      this.width = Math.min(this.maxWidth, this.text.length * 4);
+      this.height = Math.max(1, Math.ceil(this.text.length * 4 / this.maxWidth)) * 10;
+    }
+  }
+  const runtime = { wiki_title: '', bindings: { wiki: 'F7' } };
+  const names = [
+    ['Rubber Fish', 'Rusted Shield', 'Fossilized Mandrake Root', 'Porcelain Figure', 'Worn Pendant'],
+    ['Carp', 'Catfish', 'Perch', 'Pike'],
+    ['Daffodil', 'Lilac', 'Tulip', 'Wild Leek'],
+    ['Butterfly', 'Cicada', 'Firefly', 'Ladybug'],
+  ][wing];
+  const prototypes = names.map((name, id) => ({ name, name_key: `items/artifacts/item_${id}/name`, icon: 100 + id }));
+  const progress = names.map(() => false);
+  const collection = { items: names.map((_, i) => names.length - i - 1) };
+  const screen = new MuseumNode(undefined, { width: 400, height: 300 });
+  const canvas = new MuseumNode(screen, { width: 400, height: 300 });
+  canvas.board_set('selected_wing', wing);
+  const rightPage = new MuseumNode(canvas, { width: 400, height: 300 });
+  const body = new MuseumNode(rightPage, { x: 200, y: 50, width: 158, height: 177 });
+  const scroller = new MuseumNode(body, { width: 140, height: 177 });
+  const row = new MuseumNode(scroller, { width: 140, height: 43, hovered: true, canvas: scroller });
+  row.event_callbacks = { tap: { arg_array: [collection, 'test-set'] } };
+  row.pilot = {};
+  new MuseumNode(row, { type: 1 });
+  const sorted = collection.items.slice().sort((a, b) => names[a].localeCompare(names[b]));
+  const icons = sorted.map((id, i) => new MuseumNode(row, { type: 3, sprite: prototypes[id].icon, x: 6 + i * 20, y: 18 }));
+  new MuseumNode(row, { type: 3, sprite: 999, x: 120, y: 18 });
+  const menu = { canvas, right_page: rightPage, right_body: body, set_pilot: row.pilot, hide_requests: 0 };
+  const menus = { museum: menu };
+  const warnings = [];
+  const clipboard = [];
+  const open = [];
+  let sortedCount = 0;
+  const position = node => {
+    const parent = node.parent ? position(node.parent) : { x: 0, y: 0 };
+    return { x: parent.x + node.x, y: parent.y + node.y };
+  };
+  const anchor = {
+    screen_canvas: screen,
+    current_hovered_node: row,
+    pointControl: true,
+    in_point_control() { return this.pointControl; },
+    open_menus: { count: () => open.length, get: i => open[i] },
+    get_screen_position: position,
+    point_in_node(node, x, y) {
+      const p = position(node);
+      return x >= p.x && x < p.x + node.width && y >= p.y && y < p.y + node.height;
+    },
+    nine_slice: parent => new MuseumNode(parent),
+    text: parent => new MuseumNode(parent),
+    free_node: node => { node.freed = true; node.enabled = false; },
+  };
+  const context = load([
+    ...['copy_array', 'museum_warning', 'museum_wiki_title', 'museum_slots', 'museum_target',
+      'update_museum_label', 'fit_node', 'set_wiki_title', 'resolve_wiki_title'].map(privateName),
+    ...['capture_museum_wing_context', 'open_wiki', 'toggle_wiki_hints', 'reset_save'].map(publicName),
+  ], {
+    ANCHOR: anchor,
+    Menu: { Museum: 'museum', Map: 'map', Store: 'store', Crafting: 'crafting' },
+    MuseumWing: { Archaeology: 0, Fish: 1, Flora: 2, Insect: 3 },
+    NodeId: { Sprite: 3 },
+    MUSEUM_DATA: { data: Array.from({ length: 4 }, () => ({ sets: { get: key => key === 'test-set' ? collection : undefined } })) },
+    MUSEUM_PROGRESS: progress,
+    ITEM_PROTOTYPES: prototypes,
+    COMMON_LUT: 0,
+    CommonLutIndex: { Header: 1 },
+    spr_ui_tooltip_header_box: 1,
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_ready: () => true,
+    __MistriaCompanion_menu: kind => {
+      const value = menus[kind];
+      return value?.close_requested || value?.free_requested ? undefined : value;
+    },
+    __MistriaCompanion_name: prototype => prototype.name,
+    local_language: () => 'eng',
+    local_get: key => names[prototypes.findIndex(prototype => prototype.name_key === key)],
+    __MistriaCompanion_notify: () => {},
+    MistriaCompanion_capture_npc_context: () => {},
+    MistriaCompanion_capture_quest_item_context: () => {},
+    mmapi_warn_rate_limited: (...args) => warnings.push(args),
+    string_replace_all: (text, from, to) => text.replaceAll(from, to),
+    clipboard_set_text: text => clipboard.push(text),
+    List: () => {
+      const values = [];
+      return {
+        push: value => values.push(value), count: () => values.length, get: i => values[i],
+        sort_with: compare => { sortedCount++; values.sort(compare); },
+      };
+    },
+    LiveItem: function(id) {
+      this.item_id = id;
+      this.prototype = prototypes[id];
+      this.get_display_name = () => this.prototype.name;
+      this.get_ui_icon = () => this.prototype.icon;
+    },
+    string_alphanumeric_comparison: (a, b) => a.localeCompare(b),
+  });
+  const hover = index => {
+    const p = position(icons[index]);
+    context.MOUSE_GUI_X = p.x + 2;
+    context.MOUSE_GUI_Y = p.y + 2;
+    anchor.current_hovered_node = row;
+  };
+  hover(0);
+  return {
+    context, runtime, collection, prototypes, progress, names, sorted, icons, row, canvas, screen,
+    menu, menus, anchor, clipboard, warnings, open, hover, sortedCount: () => sortedCount,
+    target: context.__MistriaCompanion_museum_target,
+    resolve: context.__MistriaCompanion_resolve_wiki_title,
+  };
+}
+
+test('museum missing slots in every wing use native sorted item identities and item wiki URLs', () => {
+  for (let wing = 0; wing < 4; wing++) {
+    const h = museumHarness(wing);
+    for (let i = 0; i < h.icons.length; i++) {
+      h.hover(i);
+      const expected = h.names[h.sorted[i]];
+      assert.equal(h.resolve(), expected);
+      assert.equal(h.runtime.museum_label.board_get('name').text, expected);
+      assert.equal(h.target().donated, false);
+      h.context.MistriaCompanion_open_wiki();
+      assert.equal(h.clipboard.at(-1), `https://fieldsofmistria.wiki.gg/wiki/${expected.replaceAll(' ', '_')}`);
+    }
+    assert.equal(h.sortedCount(), 1, 'a stable row is sorted only once');
+    assert.equal(h.canvas.children.length, 2, 'only one non-interactive overlay is added');
+    assert.equal(h.warnings.length, 0);
+    assert.deepEqual(h.progress, h.names.map(() => false));
+  }
+});
+
+test('museum blank space retains wing fallback and changing the live item needs no tick', () => {
+  for (const [wing, title] of ['Archaeology Wing', 'Fish Wing', 'Flora Wing', 'Insects Wing'].entries()) {
+    const h = museumHarness(wing);
+    h.resolve();
+    h.context.MOUSE_GUI_Y = 55;
+    assert.equal(h.resolve(), title);
+    assert.equal(h.runtime.museum_label.enabled, false);
+    h.hover(3);
+    h.context.MistriaCompanion_open_wiki();
+    assert.equal(h.clipboard[0], `https://fieldsofmistria.wiki.gg/wiki/${h.names[h.sorted[3]].replaceAll(' ', '_')}`);
+    h.anchor.pointControl = false;
+    assert.equal(h.target(), undefined, 'directional set selection does not target the stationary mouse');
+  }
+});
+
+test('museum native tooltips take priority; donations remove only the extra missing-name label', () => {
+  const h = museumHarness();
+  h.resolve();
+  const plate = h.runtime.museum_label;
+  h.progress[h.sorted[0]] = true;
+  assert.equal(h.resolve(), h.names[h.sorted[0]]);
+  assert.equal(plate.enabled, false);
+  h.progress[h.sorted[0]] = false;
+  h.open.push({ is_tooltip: true, hide_requests: 0, source_node: h.row, item: { prototype: { name: 'Native tooltip' } } });
+  assert.equal(h.resolve(), 'Native tooltip');
+  assert.equal(plate.enabled, false);
+  assert.equal(h.open.length, 1, 'no native menu is added or replaced');
+});
+
+test('museum hidden, locked, freed, occluded, scrolled-out and closed targets cannot retain item links', () => {
+  const cases = [
+    h => { h.menu.hide_requests = 1; },
+    h => { h.menu.close_requested = true; },
+    h => { h.menu.free_requested = true; },
+    h => { h.menu.right_page.enabled = false; },
+    h => { h.canvas.unlocked = false; },
+    h => { h.row.freed = true; },
+    h => { h.row.marked_for_death = true; },
+    h => { h.row.hovered = false; },
+    h => { h.icons[0].enabled = false; },
+    h => { h.icons[0].freed = true; },
+    h => { h.icons[0].marked_for_death = true; },
+    h => { h.row.y = -25; h.hover(0); },
+    h => { h.anchor.current_hovered_node = {}; },
+    h => { h.menu.set_pilot = {}; },
+    h => { h.context.MUSEUM_DATA.data[0].sets.get = () => undefined; },
+  ];
+  for (const change of cases) {
+    const h = museumHarness();
+    h.resolve();
+    const plate = h.runtime.museum_label;
+    change(h);
+    assert.equal(h.target(), undefined);
+    assert.notEqual(h.resolve(), h.names[h.sorted[0]]);
+    assert.equal(plate.enabled, false);
+  }
+});
+
+test('museum slot replacement invalidates associations, and save reset frees the overlay', () => {
+  const h = museumHarness();
+  h.resolve();
+  const old = h.icons[0];
+  const replacement = Object.assign(Object.create(Object.getPrototypeOf(old)), old, { board: new Map() });
+  h.row.children[h.row.children.indexOf(old)] = replacement;
+  old.freed = true;
+  assert.equal(h.target().node, replacement);
+  assert.equal(h.sortedCount(), 2);
+  const plate = h.runtime.museum_label;
+  h.context.MistriaCompanion_reset_save({});
+  assert.equal(plate.freed, true);
+  assert.equal(h.runtime.museum_label, undefined);
+});
+
+test('museum malformed collection metadata, item IDs, progress and sprites do not guess identities', () => {
+  for (const change of [
+    h => { h.row.event_callbacks = {}; },
+    h => { h.collection.items = [999]; },
+    h => { h.collection.items = [-1]; },
+    h => { h.collection.items = [0.5]; },
+    h => { h.collection.items = ['0']; },
+    h => { h.collection.items = undefined; },
+    h => { h.row.children = []; },
+    h => { h.row.children[1].sprite = 900; },
+    h => { h.context.MUSEUM_PROGRESS = []; },
+    h => { h.progress[h.sorted[0]] = undefined; },
+    h => { h.progress[h.sorted[0]] = 'unknown'; },
+  ]) {
+    const h = museumHarness();
+    change(h);
+    assert.equal(h.target(), undefined);
+    assert.equal(h.resolve(), 'Archaeology Wing');
+    assert.ok(h.warnings.length > 0);
+    assert.ok(h.warnings.every(args => args[0] === 'mistria_item_details:museum_slots'));
+  }
+});
+
+test('museum localized and long names refresh without reordering live slots or escaping screen bounds', () => {
+  const h = museumHarness();
+  h.resolve();
+  h.prototypes[h.sorted[0]].name = 'A very long localized artifact name '.repeat(3);
+  h.context.local_language = () => 'jpn';
+  h.screen.width = 320;
+  h.screen.height = 200;
+  h.canvas.y = 50;
+  h.hover(0);
+  assert.equal(h.resolve(), 'Archaeology Wing', 'localized names must not become invalid English wiki slugs');
+  const plate = h.runtime.museum_label;
+  assert.equal(plate.board_get('name').text, h.prototypes[h.sorted[0]].name);
+  assert.equal(h.sortedCount(), 1, 'language changes do not change the IDs of already drawn icons');
+  const p = h.anchor.get_screen_position(plate);
+  assert.ok(p.x >= 4 && p.y >= 4);
+  assert.ok(p.x + plate.width <= h.screen.width - 4);
+  assert.ok(p.y + plate.height <= h.screen.height - 4);
+  h.canvas.x = -100;
+  h.hover(0);
+  h.resolve();
+  assert.ok(h.anchor.get_screen_position(plate).x >= 4, 'same-size moving labels are reclamped');
+});
+
+test('museum wiki title lookup uses English names only and never changes the active language', () => {
+  const h = museumHarness();
+  h.context.local_set_language = () => assert.fail('Museum lookup must not change the game language');
+  assert.equal(h.resolve(), h.names[h.sorted[0]]);
+  h.context.local_language = () => 'jpn';
+  assert.equal(h.resolve(), 'Archaeology Wing');
+  assert.ok(h.warnings.some(args => args[0] === 'mistria_item_details:museum_wiki_language'));
+  h.context.local_language = () => 'eng';
+  for (const value of [undefined, '', 'MISSING', 'PLACEHOLDER', h.prototypes[h.sorted[0]].name_key]) {
+    h.context.local_get = () => value;
+    assert.equal(h.resolve(), 'Archaeology Wing');
+  }
+  assert.ok(h.warnings.some(args => args[0] === 'mistria_item_details:museum_wiki_name'));
+});
+
+test('museum wiki hints can be disabled without hiding names or changing registered bindings', () => {
+  const h = museumHarness();
+  h.runtime.wiki_hints_enabled = true;
+  h.runtime.bindings.wiki = 'SHIFT+F7';
+  h.context.MistriaCompanion_toggle_wiki_hints();
+  h.context.MistriaCompanion_open_wiki();
+  assert.equal(h.runtime.wiki_hints_enabled, false);
+  assert.equal(h.runtime.museum_label.enabled, true);
+  assert.equal(h.clipboard.length, 1);
+  assert.equal(h.runtime.bindings.wiki, 'SHIFT+F7');
+});
 
 function settingsHarness() {
   class SettingsNode extends Node {
@@ -1118,6 +1514,7 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
     MistriaCompanion_capture_quest_item_context: () => {},
     MistriaCompanion_capture_museum_wing_context: () => {},
     MIST_SIGHT_ACTIVE_INDEX: 0,
+    __MistriaCompanion_update_museum_label: () => {},
     MIST_SIGHT_LIST: { count: () => spots.length, get: index => spots[index] },
     CURRENT_LOCATION_ID: 0,
     CURRENT_DYN_INDEX: 77,
@@ -1336,6 +1733,7 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     MistriaCompanion_refresh_map_markers: () => refreshes++,
     MistriaCompanion_add_chest_gift_button: () => {},
     __MistriaCompanion_resolve_wiki_title: () => { runtime.wiki_title = ''; },
+    __MistriaCompanion_update_museum_label: () => {},
     __MistriaCompanion_show_wiki_hint: () => {},
   });
   context.MistriaCompanion_reset_save({});
