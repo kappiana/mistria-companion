@@ -4,6 +4,7 @@ function __MistriaCompanion_runtime() {
             registered: false,
             bindings: undefined,
             keybind_rows: [],
+            mounted_interactions_enabled: true,
             frame: 0,
             clock_paused: false,
             cache: {},
@@ -113,11 +114,12 @@ function __MistriaCompanion_register_hotkeys() {
     if (_runtime.bindings != undefined) return;
 
     var _config = mmapi_config_read_valid("mistria_item_details", 1);
+    _runtime.mounted_interactions_enabled = __MistriaCompanion_mounted_setting(_config);
     var _actions = __MistriaCompanion_hotkey_actions();
     _runtime.bindings = {};
     _runtime.keybind_rows = [];
     var _registered = {};
-    var _saved = {};
+    var _saved = { mounted_interactions_enabled: _runtime.mounted_interactions_enabled };
     for (var _index = 0; _index < array_length(_actions); _index++) {
         var _action = _actions[_index];
         var _row = { title: _action.title, bindings: [] };
@@ -154,6 +156,127 @@ function __MistriaCompanion_register_hotkeys() {
         array_push(_runtime.keybind_rows, _row);
     }
     mmapi_config_write("mistria_item_details", 1, _saved);
+}
+
+function __MistriaCompanion_mounted_setting(_config) {
+    if (__MistriaCompanion_field(_config, "mounted_interactions_enabled") != undefined) {
+        // Read the member inline: the engine can coerce bool locals to numbers.
+        if (typeof(_config.mounted_interactions_enabled) == "bool") {
+            return _config.mounted_interactions_enabled;
+        }
+        mmapi_log_warn("mistria_item_details", "Invalid mounted_interactions_enabled; using true.");
+    }
+    return true;
+}
+
+function __MistriaCompanion_mounted_ready() {
+    return ARI.mount != undefined
+        && ARI.fire_breath_time <= 0
+        && obj_ari.fsm.current_state_id() == PlayerState.MountDefault
+        && obj_ari.fsm.next_state == undefined
+        && !non_cutscene_pause()
+        && !MIST.running
+        && __MistriaCompanion_menu(Menu.Textbox) == undefined;
+}
+
+function __MistriaCompanion_mounted_condition() {
+    if (!__MistriaCompanion_runtime().mounted_interactions_enabled
+        || !instance_exists(obj_ari) || !obj_ari.is_mounted())
+    {
+        return self.original();
+    }
+    if (!__MistriaCompanion_mounted_ready()) return false;
+
+    var _npc = self.npc;
+    if (!instance_exists(_npc)) return false;
+    if (_npc.npc_id == NpcId.Caldarus && caldarus_is_sleeping()) return false;
+
+    // Mirror only the native talk/gift predicates, without ari_can_talk's mount veto.
+    if (!self.gift) {
+        return _npc.can_talk() && _npc.my_query_quests().is_empty();
+    }
+    if (!_npc.me.gift_flag) return false;
+    var _item = ARI.held_item();
+    return _item != undefined
+        && _item.prototype.giftable
+        && !_item.prototype.tags.contains_any_value_from(_npc.me.prototype.banned_gift_tags)
+        && npc_is_unlocked(_npc.npc_id);
+}
+
+function __MistriaCompanion_wrap_mounted_interaction(_npc, _interaction, _gift) {
+    if (__MistriaCompanion_field(_interaction, "__mistria_companion_mounted") != undefined) return;
+    if (typeof(__MistriaCompanion_field(_interaction, "can_interact_callback")) != "method"
+        || typeof(__MistriaCompanion_field(_interaction, "callback")) != "method")
+    {
+        mmapi_warn_rate_limited("mistria_item_details:mounted_callback", "mistria_item_details",
+            "Mounted interactions: unsupported villager callback; leaving it unchanged.");
+        return;
+    }
+    var _context = {
+        npc: _npc,
+        gift: _gift,
+        original: _interaction.can_interact_callback
+    };
+    _interaction.__mistria_companion_mounted = _context;
+    _interaction.can_interact_callback = method(_context, __MistriaCompanion_mounted_condition);
+}
+
+function __MistriaCompanion_install_mounted_npc(_npc) {
+    if (__MistriaCompanion_field(_npc, "me") == undefined
+        || __MistriaCompanion_field(_npc, "fsm") == undefined) return;
+    var _interactions = __MistriaCompanion_field(_npc, "interactions");
+    if (!is_struct(_interactions) || typeof(__MistriaCompanion_field(_interactions, "count")) != "method"
+        || typeof(__MistriaCompanion_field(_interactions, "get")) != "method")
+    {
+        mmapi_warn_rate_limited("mistria_item_details:mounted_list", "mistria_item_details",
+            "Mounted interactions: unsupported villager interaction list; leaving it unchanged.");
+        return;
+    }
+    var _count = _interactions.count();
+    var _installed = __MistriaCompanion_field(_npc, "__mistria_companion_mounted");
+    if (_installed != undefined && _installed.list == _interactions && _installed.count == _count) return;
+
+    var _talk = undefined;
+    var _gift = undefined;
+    var _talk_count = 0;
+    var _gift_count = 0;
+    var _talk_first = -1;
+    var _talk_last = -1;
+    for (var _index = 0; _index < _count; _index++) {
+        var _interaction = _interactions.get(_index);
+        if (!is_struct(_interaction)) continue;
+        var _key = __MistriaCompanion_field(_interaction, "local_key");
+        var _input = __MistriaCompanion_field(_interaction, "input_id");
+        if (_key == "misc_local/talk" && _input == InputId.Interact) {
+            if (_talk_count == 0) {
+                _talk = _interaction;
+                _talk_first = _index;
+            }
+            _talk_last = _index;
+            _talk_count++;
+        } else if (_key == "misc_local/give_item" && _input == InputId.Throw) {
+            _gift = _interaction;
+            _gift_count++;
+        }
+    }
+    // Caldarus appends a separate sleeping-only Talk after the inherited entries.
+    var _caldarus_pair = _npc.npc_id == NpcId.Caldarus && _talk_count == 2
+        && _talk_first == 0 && _talk_last == _count - 1;
+    if (_talk_count == 1 || _caldarus_pair) __MistriaCompanion_wrap_mounted_interaction(_npc, _talk, false);
+    if (_gift_count == 1) __MistriaCompanion_wrap_mounted_interaction(_npc, _gift, true);
+    if ((_talk_count != 1 && !_caldarus_pair) || _gift_count != 1) {
+        mmapi_warn_rate_limited("mistria_item_details:mounted_entries", "mistria_item_details",
+            "Mounted interactions: missing or duplicate talk/gift entries; ambiguous entries were left unchanged.");
+    }
+    _npc.__mistria_companion_mounted = { list: _interactions, count: _count };
+}
+
+function MistriaCompanion_update_mounted_interactions() {
+    if (!__MistriaCompanion_runtime().mounted_interactions_enabled) return;
+    for (var _index = 0; _index < instance_number(par_NPC); _index++) {
+        var _npc = instance_find(par_NPC, _index);
+        if (instance_exists(_npc)) __MistriaCompanion_install_mounted_npc(_npc);
+    }
 }
 
 function __MistriaCompanion_keybind_names(_names) {
@@ -1869,6 +1992,7 @@ function MistriaCompanion_tick() {
         _runtime.wiki_hint_title = "";
         return;
     }
+    MistriaCompanion_update_mounted_interactions();
     var _language = local_language();
     if (_runtime.language != _language) {
         _runtime.language = _language;
@@ -1931,5 +2055,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.38");
+mmapi_mod_declare("mistria_item_details", "1.0.39");
 MistriaCompanion_register();

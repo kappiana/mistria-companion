@@ -1,8 +1,8 @@
 {
   "name": "Mistria Companion",
   "author": "kappiana",
-  "version": "1.0.38",
-  "description": "Adds item details, wiki shortcuts, HUD information, spawn alerts, map helpers, and clock controls.",
+  "version": "1.0.39",
+  "description": "Adds item details, wiki shortcuts, HUD information, spawn alerts, map helpers, clock controls, and mounted conversations and gifting.",
   "minInstallerVersion": "0.15.5",
   "manifestVersion": 1,
   "requires_hooks": [

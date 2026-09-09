@@ -7,6 +7,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Shows compact cooking or crafting recipe summaries for a hovered item.
 - Lists villagers who like or love the actual hovered item, including its infusion and special-item gift rules.
 - Adds a chest button that grabs one loved gift for each met villager who has not received a gift that day, prioritizing birthdays and available backpack space.
+- Allows ordinary villager conversations and gifting while riding your mount, using the normal controls.
 - Copies relevant Fields of Mistria Wiki links for items, villagers, calendar birthdays, quest objectives, Museum wings, and map markers.
 - Shows villager names when hovering known NPC map markers.
 - Displays today's birthdays below the mana meter.
@@ -92,6 +93,22 @@ The picker accounts for overlapping preferences, partial stacks, and item
 variants. It does not mark a villager as gifted until the gift is actually given.
 Repeated clicks can collect another set while those villagers remain ungifted.
 
+### Talking and gifting while mounted
+
+Use the normal **Talk** or **Give item** control near a villager while riding.
+Select a gift in your toolbar as usual. Ordinary conversations leave you mounted;
+the game still handles the dialogue, item consumption, and friendship changes.
+Normal gift restrictions still apply.
+
+This feature does not unlock quest turn-ins, dates, proposals, kissing, petting,
+or other special interactions while mounted. A villager waiting for a quest
+turn-in may still require you to dismount before talking. Jumping, dismounting,
+and scripted cutscene transitions keep their normal behavior.
+
+Mounted talking and gifting are enabled by default. To disable both, close the
+game, set `"mounted_interactions_enabled": false` in the configuration file below,
+and restart. This setting does not add or change any hotkeys.
+
 ### Remapping keys
 
 After the first launch, close the game and edit:
@@ -105,6 +122,7 @@ The file contains these defaults:
 ```json
 {
   "__config_version": 1,
+  "mounted_interactions_enabled": true,
   "clock": "F5",
   "clock_alternate": "",
   "sightings": "F6",
@@ -125,8 +143,8 @@ uppercase names such as `F7`, `HOME`, `GAMEPAD_Y`, and chords such as `SHIFT+F7`
 Use an empty string for no alternate. Invalid primary bindings fall back to their
 defaults; invalid alternates are disabled. Duplicate bindings within the mod are
 ignored after the first registration and logged. The wiki hint uses the registered
-wiki binding. Restart the game after editing. Only bindings persist in this file,
-not the session toggle states.
+wiki binding. Restart the game after editing. Bindings and the mounted-interaction
+setting persist in this file, but the session toggle states do not.
 
 ## Spawn information
 
@@ -153,6 +171,7 @@ On entering a newly generated mine floor, a compact `Mine bugs:` notification li
 - Long recipe lists are summarized rather than expanded in full.
 - Gift selection has a search limit to avoid long delays. If the notification says that limit was reached, additional gifts may still fit in your backpack.
 - Other mods can register the same hotkeys or change native menus and game data. Remap conflicting keys and test your actual mod combination.
+- Mods that replace villager talk or gift eligibility can conflict with mounted interactions. Disable this feature if another mod needs to control those rules.
 
 ## Troubleshooting
 

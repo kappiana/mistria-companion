@@ -8,8 +8,10 @@ const source = readFileSync(join(__dirname, '..', 'MistriaCompanion', 'gml', 'Mi
 const privateName = name => `__MistriaCompanion_${name}`;
 const publicName = name => `MistriaCompanion_${name}`;
 
-// These functions use the JS-compatible subset of GML. Execute their actual
-// source, with narrow game-API stand-ins; this is not a GameMaker runtime test.
+// Execute actual function source, translating only GML struct access and typeof.
+// JS functions stand in for GML methods; method() saves/restores VM self so nested
+// NPC-bound callbacks retain their receiver. This is not a real game VM: engine
+// types/coercion, JSON parsing, native input dispatch, and FSM execution are not simulated.
 function load(names, overrides = {}) {
   const context = vm.createContext({
     array_create: (count, value) => Array(count).fill(value),
@@ -17,8 +19,11 @@ function load(names, overrides = {}) {
     array_push: (array, value) => array.push(value),
     array_sort: (array, compare) => array.sort(compare),
     is_array: Array.isArray,
+    is_struct: value => value !== null && typeof value === 'object' && !Array.isArray(value),
     is_real: value => typeof value === 'number' && Number.isFinite(value),
     is_string: value => typeof value === 'string',
+    gml_typeof: value => typeof value === 'boolean' ? 'bool'
+      : typeof value === 'function' ? 'method' : typeof value,
     min: Math.min,
     max: Math.max,
     ceil: Math.ceil,
@@ -27,12 +32,26 @@ function load(names, overrides = {}) {
     __MistriaCompanion_field: (value, key) => value?.[key],
     ...overrides,
   });
+  if (!overrides.method) {
+    context.method = (receiver, callback) => (...args) => {
+      const previous = context.self;
+      context.self = receiver;
+      try {
+        return callback(...args);
+      } finally {
+        context.self = previous;
+      }
+    };
+  }
   for (const name of names) {
     const start = source.indexOf(`function ${name}(`);
     assert.notEqual(start, -1, `Missing source function ${name}`);
     const next = source.indexOf('\nfunction ', start + 1);
     assert.notEqual(next, -1, `Expected another declaration after ${name}`);
-    vm.runInContext(source.slice(start, next), context, { filename: `${name}.gml` });
+    const executable = source.slice(start, next)
+      .replace(/\[\$\s*([^\]]+)\]/g, '[$1]')
+      .replace(/\btypeof\s*\(/g, 'gml_typeof(');
+    vm.runInContext(executable, context, { filename: `${name}.gml` });
   }
   return context;
 }
@@ -234,6 +253,570 @@ test('clock release preserves the incoming engine/filter result and save reset c
   assert.equal(runtime.all_bug_markers_enabled, true);
   assert.equal(runtime.dig_spots.length, 0);
   assert.equal(runtime.legendary_sightings.length, 0);
+});
+
+const hotkeyCallbacks = [
+  'toggle_clock', 'show_legendary_sightings', 'open_wiki',
+  'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_dig_spot_notifications',
+];
+
+function mountedConfigHarness(config) {
+  const reads = [];
+  const writes = [];
+  const registrations = [];
+  const warnings = [];
+  const context = load([
+    privateName('runtime'), privateName('mounted_setting'),
+    privateName('hotkey_actions'), privateName('register_hotkeys'), publicName('reset_save'),
+  ], {
+    global: {},
+    ...Object.fromEntries(hotkeyCallbacks.map(name => [publicName(name), () => name])),
+    mmapi_config_read_valid: (...args) => { reads.push(args); return config; },
+    mmapi_config_write: (...args) => writes.push(args),
+    mmapi_log_warn: (...args) => warnings.push(args),
+    mmapi_hotkey_binding_from_name: name => name === '' ? undefined : { name },
+    mmapi_hotkey_register_binding: (binding, callback) => registrations.push({ binding, callback }),
+  });
+  return {
+    context, reads, writes, registrations, warnings,
+    runtime: context.__MistriaCompanion_runtime(),
+    register: context.__MistriaCompanion_register_hotkeys,
+  };
+}
+
+test('mounted config defaults enabled and persists explicit boolean values without repeated registration', () => {
+  for (const config of [undefined, {}, { mounted_interactions_enabled: true }, { mounted_interactions_enabled: false }]) {
+    const { context, runtime, register, reads, writes, registrations, warnings } = mountedConfigHarness(config);
+    assert.equal(runtime.mounted_interactions_enabled, true, 'runtime defaults on before config is read');
+    register();
+    const expected = config?.mounted_interactions_enabled ?? true;
+    assert.equal(runtime.mounted_interactions_enabled, expected);
+    assert.equal(writes[0][2].mounted_interactions_enabled, expected);
+    assert.deepEqual(reads, [['mistria_item_details', 1]]);
+    assert.deepEqual(writes[0].slice(0, 2), ['mistria_item_details', 1]);
+    assert.deepEqual(registrations.map(row => row.binding.name), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10']);
+    assert.equal(warnings.length, 0);
+    context.MistriaCompanion_reset_save({});
+    register();
+    assert.equal(runtime.mounted_interactions_enabled, expected, 'save reset preserves the configured preference');
+    assert.equal(reads.length, 1);
+    assert.equal(writes.length, 1);
+    assert.equal(registrations.length, 6);
+  }
+});
+
+test('mounted config rejects string and numeric values with a warning and saves the enabled default', () => {
+  for (const value of ['false', 'true', '', 0, 1, -1, 2, [], {}]) {
+    const { runtime, register, writes, warnings } = mountedConfigHarness({ mounted_interactions_enabled: value });
+    register();
+    register();
+    assert.equal(runtime.mounted_interactions_enabled, true, `Invalid value: ${JSON.stringify(value)}`);
+    assert.equal(writes[0][2].mounted_interactions_enabled, true);
+    assert.equal(writes.length, 1);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0][0], 'mistria_item_details');
+    assert.match(warnings[0][1], /mounted_interactions_enabled.*true/);
+  }
+});
+
+test('mounted config treats null or undefined members as missing and saves the enabled default', () => {
+  // Check the missing-value policy, not the engine's JSON-null representation.
+  for (const value of [null, undefined]) {
+    const { runtime, register, writes, warnings } = mountedConfigHarness({ mounted_interactions_enabled: value });
+    register();
+    register();
+    assert.equal(runtime.mounted_interactions_enabled, true);
+    assert.equal(writes[0][2].mounted_interactions_enabled, true);
+    assert.equal(writes.length, 1);
+    assert.equal(warnings.length, 0);
+  }
+});
+
+test('mounted config preserves custom primary and alternate keybindings while writing the setting once', () => {
+  const config = {
+    mounted_interactions_enabled: false,
+    clock: 'HOME', clock_alternate: 'SHIFT+HOME',
+    sightings: 'END', sightings_alternate: '',
+    wiki: 'F11', wiki_alternate: 'SHIFT+F11',
+    wiki_hints: 'F12', wiki_hints_alternate: '',
+    bugs: 'INSERT', bugs_alternate: 'SHIFT+INSERT',
+    dig_notifications: 'DELETE', dig_notifications_alternate: '',
+  };
+  const before = { ...config };
+  const { context, runtime, register, reads, writes, registrations, warnings } = mountedConfigHarness(config);
+  register();
+  register();
+  assert.deepEqual(config, before, 'registration does not mutate the loaded config');
+  assert.deepEqual({ ...writes[0][2] }, before);
+  assert.equal(reads.length, 1);
+  assert.equal(writes.length, 1);
+  assert.equal(warnings.length, 0);
+  const actions = context.__MistriaCompanion_hotkey_actions();
+  const expected = Array.from(actions).flatMap(action =>
+    [config[action.key], config[`${action.key}_alternate`]]
+      .filter(Boolean).map(name => ({ name, callback: action.callback })));
+  assert.deepEqual(registrations.map(({ binding, callback }) => ({ name: binding.name, callback })), expected);
+  for (const [index, action] of Array.from(actions).entries()) {
+    assert.equal(runtime.bindings[action.key], config[action.key]);
+    assert.equal(runtime.keybind_rows[index].title, action.title);
+    assert.deepEqual(Array.from(runtime.keybind_rows[index].bindings),
+      [config[action.key], config[`${action.key}_alternate`]].filter(Boolean));
+  }
+});
+
+function mountedHarness() {
+  const runtime = { mounted_interactions_enabled: true };
+  const state = {
+    mounted: true, playerState: 'MountDefault', paused: false,
+    textbox: undefined, sleeping: false, unlocked: true, heldReads: 0,
+    held: { amount: 2, prototype: { giftable: true, tags: list([]) } },
+  };
+  const npcs = [];
+  const warnings = [];
+  const conditions = [];
+  const actions = [];
+  const player = {
+    alive: true,
+    is_mounted: () => state.mounted,
+    fsm: { current_state_id: () => state.playerState, next_state: undefined },
+  };
+  const context = load([
+    privateName('mounted_ready'), privateName('mounted_condition'),
+    privateName('wrap_mounted_interaction'), privateName('install_mounted_npc'),
+    publicName('update_mounted_interactions'),
+  ], {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_menu: kind => {
+      assert.equal(kind, 'Textbox');
+      return state.textbox;
+    },
+    ARI: {
+      mount: {}, fire_breath_time: 0,
+      held_item: () => { state.heldReads++; return state.held; },
+    },
+    obj_ari: player,
+    PlayerState: { MountDefault: 'MountDefault', MountJump: 'MountJump', Default: 'Default' },
+    Menu: { Textbox: 'Textbox' },
+    NpcId: { Caldarus: 999 },
+    InputId: { Interact: 'Interact', Throw: 'Throw' },
+    MIST: { running: false },
+    non_cutscene_pause: () => state.paused,
+    caldarus_is_sleeping: () => state.sleeping,
+    npc_is_unlocked: () => state.unlocked,
+    par_NPC: 'par_NPC',
+    instance_number: kind => { assert.equal(kind, 'par_NPC'); return npcs.length; },
+    instance_find: (kind, index) => { assert.equal(kind, 'par_NPC'); return npcs[index]; },
+    instance_exists: instance => instance != null && instance.alive === true,
+    mmapi_warn_rate_limited: (...args) => warnings.push(args),
+  });
+  function interactionList(entries) {
+    return {
+      reads: 0,
+      count: () => entries.length,
+      get(index) { this.reads++; return entries[index]; },
+    };
+  }
+  function entry(npc, kind, key, input) {
+    return {
+      local_key: key,
+      input_id: input,
+      can_interact_callback: context.method(npc, () => {
+        assert.equal(context.self, npc, 'native eligibility keeps its original NPC receiver');
+        conditions.push({ npc, kind });
+        return npc[`${kind}Result`];
+      }),
+      callback: context.method(npc, () => {
+        assert.equal(context.self, npc, 'native action keeps its original NPC receiver');
+        actions.push({ npc, kind });
+        if (kind === 'gift') state.held.amount--;
+        return `${kind} action`;
+      }),
+    };
+  }
+  function makeNpc(id = npcs.length + 1) {
+    const npc = {
+      npc_id: id, alive: true, talkAllowed: true, questsEmpty: true,
+      talkResult: false, giftResult: false,
+      me: { gift_flag: true, prototype: { banned_gift_tags: list(['banned']) } },
+      fsm: {},
+    };
+    npc.can_talk = () => npc.talkAllowed;
+    npc.my_query_quests = () => ({ is_empty: () => npc.questsEmpty });
+    npc.entries = [
+      entry(npc, 'talk', 'misc_local/talk', context.InputId.Interact),
+      entry(npc, 'gift', 'misc_local/give_item', context.InputId.Throw),
+      entry(npc, 'quest', 'quest', context.InputId.Interact),
+      entry(npc, 'date', 'date', context.InputId.Interact),
+      entry(npc, 'proposal', 'proposal', context.InputId.Throw),
+    ];
+    npc.interactions = interactionList(npc.entries);
+    npcs.push(npc);
+    return npc;
+  }
+  return {
+    context, runtime, state, player, npcs, warnings, conditions, actions,
+    makeNpc, entry, interactionList,
+    install: context.__MistriaCompanion_install_mounted_npc,
+    update: context.MistriaCompanion_update_mounted_interactions,
+  };
+}
+
+test('mounted wrappers delegate exact native results off-mount or when disabled without rebinding callbacks', () => {
+  for (const mode of ['off-mount', 'disabled', 'missing-player']) {
+    const { context, state, runtime, player, conditions, makeNpc, update } = mountedHarness();
+    const npc = makeNpc();
+    const originals = npc.entries.slice(0, 2).map(entry => entry.can_interact_callback);
+    update();
+    if (mode === 'off-mount') state.mounted = false;
+    if (mode === 'disabled') runtime.mounted_interactions_enabled = false;
+    if (mode === 'missing-player') player.alive = false;
+    npc.can_talk = () => assert.fail('delegated mode must not evaluate mounted predicates');
+    context.ARI.held_item = () => assert.fail('delegated mode must not inspect held items');
+    context.self = { outer: true };
+    const outer = context.self;
+    for (const result of [undefined, null, false, true, 0, 7, 'native result', { native: true }]) {
+      npc.talkResult = result;
+      npc.giftResult = result;
+      for (const [index, interaction] of npc.entries.slice(0, 2).entries()) {
+        assert.equal(interaction.__mistria_companion_mounted.original, originals[index]);
+        assert.equal(interaction.can_interact_callback(), result);
+        assert.equal(context.self, outer, 'nested bound calls restore their caller');
+      }
+    }
+    assert.equal(conditions.length, 16);
+  }
+});
+
+test('mounted ordinary talk preserves can_talk and quest eligibility', () => {
+  const { makeNpc, conditions, update } = mountedHarness();
+  const npc = makeNpc();
+  update();
+  const canTalk = () => npc.entries[0].can_interact_callback();
+  assert.equal(canTalk(), true);
+  npc.talkAllowed = false;
+  assert.equal(canTalk(), false);
+  npc.talkAllowed = true;
+  npc.questsEmpty = false;
+  assert.equal(canTalk(), false);
+  npc.questsEmpty = true;
+  assert.equal(canTalk(), true);
+  assert.equal(conditions.length, 0, 'native mount-vetoing predicates are not evaluated in mounted mode');
+});
+
+test('mounted Caldarus native talk/gift/sleepTalk layout wraps only ordinary entries and preserves sleeping callbacks', () => {
+  const { context, makeNpc, entry, state, actions, warnings, update } = mountedHarness();
+  const caldarus = makeNpc(context.NpcId.Caldarus);
+  const otherNpc = makeNpc();
+  const sleepTalk = entry(caldarus, 'sleep-talk', 'misc_local/talk', context.InputId.Interact);
+  // The native subclass appends this after inherited interactions. Only its
+  // ari_can_talk mount veto is simulated here; other player guards have separate tests.
+  sleepTalk.can_interact_callback = context.method(caldarus, () => {
+    assert.equal(context.self, caldarus);
+    return caldarus.can_talk() && state.sleeping && !state.mounted;
+  });
+  caldarus.entries.push(sleepTalk);
+  const entries = [...caldarus.entries];
+  const before = entries.map(entry => ({ ...entry }));
+  update();
+  update();
+  assert.equal(warnings.length, 0, 'the exact native two-Talk layout is not ambiguous');
+  assert.equal(caldarus.entries.length, entries.length);
+  for (const [index, interaction] of caldarus.entries.entries()) {
+    assert.equal(interaction, entries[index], 'the native list order and entry identity are preserved');
+    assert.equal(interaction.callback, before[index].callback);
+    assert.equal(interaction.local_key, before[index].local_key);
+    assert.equal(interaction.input_id, before[index].input_id);
+    if (index < 2) {
+      assert.notEqual(interaction.can_interact_callback, before[index].can_interact_callback);
+    } else {
+      assert.deepEqual(interaction, before[index], 'all extra callbacks, including sleepTalk, remain identical');
+    }
+  }
+  assert.equal(sleepTalk.__mistria_companion_mounted, undefined);
+  for (const sleeping of [false, true, false]) {
+    state.sleeping = sleeping;
+    assert.equal(caldarus.entries[0].can_interact_callback(), !sleeping);
+    assert.equal(caldarus.entries[1].can_interact_callback(), !sleeping);
+    assert.equal(sleepTalk.can_interact_callback(), false, 'native sleeping Talk still vetoes mounted use');
+    assert.equal(otherNpc.entries[0].can_interact_callback(), true, 'Caldarus sleep does not affect other villagers');
+  }
+  state.sleeping = true;
+  state.mounted = false;
+  assert.equal(sleepTalk.can_interact_callback(), true, 'sleeping conversation remains available off-mount');
+  caldarus.talkAllowed = false;
+  assert.equal(sleepTalk.can_interact_callback(), false, 'native sleeping Talk retains its can_talk check');
+  assert.equal(actions.length, 0, 'installation and eligibility never execute conversation or gift actions');
+});
+
+test('mounted gift eligibility preserves daily flag, held item, giftability, banned tags, unlock, and Caldarus rules', () => {
+  const { context, makeNpc, state, conditions, update } = mountedHarness();
+  const npc = makeNpc();
+  const caldarus = makeNpc(context.NpcId.Caldarus);
+  update();
+  const canGift = () => npc.entries[1].can_interact_callback();
+  const canGiftCaldarus = () => caldarus.entries[1].can_interact_callback();
+  const held = state.held;
+  assert.equal(canGift(), true);
+  npc.me.gift_flag = false;
+  assert.equal(canGift(), false);
+  npc.me.gift_flag = true;
+  state.held = undefined;
+  assert.equal(canGift(), false);
+  state.held = held;
+  held.prototype.giftable = false;
+  assert.equal(canGift(), false);
+  held.prototype.giftable = true;
+  held.prototype.tags = list(['ordinary', 'banned']);
+  assert.equal(canGift(), false);
+  held.prototype.tags = list(['ordinary']);
+  state.unlocked = false;
+  assert.equal(canGift(), false);
+  assert.equal(canGiftCaldarus(), false);
+  state.unlocked = true;
+  assert.equal(canGift(), true);
+  assert.equal(canGiftCaldarus(), true);
+  state.sleeping = true;
+  assert.equal(canGiftCaldarus(), false);
+  assert.equal(canGift(), true);
+  state.sleeping = false;
+  npc.talkAllowed = false;
+  npc.questsEmpty = false;
+  assert.equal(canGift(), true, 'gifting does not acquire talk-only restrictions');
+  assert.equal(conditions.length, 0);
+  assert.equal(held.amount, 2, 'eligibility never consumes an item');
+});
+
+test('mounted talk and gift are blocked by jump, pending FSM change, pause, MIST, textbox, fire breath, or no mount', () => {
+  const cases = [
+    ['MountJump', h => { h.state.playerState = h.context.PlayerState.MountJump; }],
+    ['other player state', h => { h.state.playerState = h.context.PlayerState.Default; }],
+    ['pending FSM state zero', h => { h.player.fsm.next_state = 0; }],
+    ['pending FSM state', h => { h.player.fsm.next_state = {}; }],
+    ['pause', h => { h.state.paused = true; }],
+    ['MIST', h => { h.context.MIST.running = true; }],
+    ['textbox', h => { h.state.textbox = {}; }],
+    ['fire breath', h => { h.context.ARI.fire_breath_time = 1; }],
+    ['missing mount', h => { h.context.ARI.mount = undefined; }],
+  ];
+  for (const [label, block] of cases) {
+    const harness = mountedHarness();
+    const npc = harness.makeNpc();
+    harness.update();
+    assert.equal(harness.context.__MistriaCompanion_mounted_ready(), true);
+    block(harness);
+    assert.equal(harness.context.__MistriaCompanion_mounted_ready(), false, label);
+    assert.equal(npc.entries[0].can_interact_callback(), false, `${label}: talk`);
+    assert.equal(npc.entries[1].can_interact_callback(), false, `${label}: gift`);
+    assert.equal(harness.conditions.length, 0);
+    assert.equal(harness.state.heldReads, 0, 'guards precede held-item access');
+  }
+});
+
+test('mounted installation preserves native action identity, ordering, input keys, and unrelated quest/date/proposal callbacks', () => {
+  const { context, state, makeNpc, actions, conditions, update } = mountedHarness();
+  const npc = makeNpc();
+  const entries = [...npc.entries];
+  const before = entries.map(entry => ({ ...entry }));
+  const nativeList = npc.interactions;
+  update();
+  update();
+  assert.equal(npc.interactions, nativeList);
+  assert.equal(npc.entries.length, before.length);
+  assert.equal(actions.length, 0);
+  assert.equal(conditions.length, 0);
+  assert.equal(state.heldReads, 0);
+  assert.equal(state.held.amount, 2, 'installer does not consume inventory');
+  for (const [index, entry] of npc.entries.entries()) {
+    assert.equal(entry, entries[index], 'native entries retain their identity and order');
+    assert.equal(entry.callback, before[index].callback);
+    assert.equal(entry.local_key, before[index].local_key);
+    assert.equal(entry.input_id, before[index].input_id);
+    if (index < 2) {
+      assert.notEqual(entry.can_interact_callback, before[index].can_interact_callback);
+    } else {
+      assert.deepEqual(entry, before[index], 'unrelated actions and predicates remain untouched');
+    }
+  }
+  // A single synthetic native input dispatch; not a claim about the engine's input loop.
+  function dispatch(input) {
+    const chosen = npc.entries.find(entry => entry.input_id === input && entry.can_interact_callback());
+    return chosen?.callback();
+  }
+  assert.equal(dispatch(context.InputId.Interact), 'talk action');
+  assert.equal(dispatch(context.InputId.Throw), 'gift action');
+  assert.deepEqual(actions.map(action => action.kind), ['talk', 'gift']);
+  assert.ok(actions.every(action => action.npc === npc));
+  assert.equal(state.held.amount, 1, 'only the single native gift callback consumes an item');
+});
+
+test('mounted installer is idempotent for a stable list and list growth without overriding foreign callback changes', () => {
+  const { makeNpc, entry, update, warnings, context } = mountedHarness();
+  const npc = makeNpc();
+  update();
+  const wrappers = npc.entries.slice(0, 2).map(entry => entry.can_interact_callback);
+  const contexts = npc.entries.slice(0, 2).map(entry => entry.__mistria_companion_mounted);
+  const reads = npc.interactions.reads;
+  update();
+  update();
+  assert.equal(npc.interactions.reads, reads, 'unchanged list/count is not rescanned');
+  npc.entries.push(entry(npc, 'extra-quest', 'extra-quest', context.InputId.Interact));
+  update();
+  assert.equal(npc.interactions.reads, reads + npc.entries.length);
+  for (const [index, wrapper] of wrappers.entries()) {
+    assert.equal(npc.entries[index].can_interact_callback, wrapper);
+    assert.equal(npc.entries[index].__mistria_companion_mounted, contexts[index]);
+    assert.notEqual(contexts[index].original, wrapper, 'never wrap a wrapper');
+  }
+  const foreignCondition = () => 'foreign predicate';
+  const foreignAction = () => 'foreign action';
+  npc.entries[0].can_interact_callback = foreignCondition;
+  npc.entries[1].callback = foreignAction;
+  update();
+  npc.entries.push(entry(npc, 'extra-date', 'extra-date', context.InputId.Interact));
+  update();
+  assert.equal(npc.entries[0].can_interact_callback, foreignCondition);
+  assert.equal(npc.entries[1].callback, foreignAction);
+  assert.equal(npc.entries[0].__mistria_companion_mounted, contexts[0]);
+  assert.equal(warnings.length, 0);
+});
+
+test('mounted updater handles new and replaced NPCs, destroyed instances, and replacement interaction lists', () => {
+  const { makeNpc, entry, npcs, context, interactionList, update, warnings } = mountedHarness();
+  const first = makeNpc(1);
+  update();
+  const staleTalk = first.entries[0].can_interact_callback;
+  const staleGift = first.entries[1].can_interact_callback;
+  first.alive = false;
+  first.interactions = undefined;
+  npcs.push(undefined, { alive: false });
+  const replacement = makeNpc(1);
+  const newcomer = makeNpc(2);
+  update();
+  assert.equal(staleTalk(), false);
+  assert.equal(staleGift(), false);
+  for (const npc of [replacement, newcomer]) {
+    assert.equal(npc.entries[0].__mistria_companion_mounted.npc, npc);
+    assert.equal(npc.entries[0].can_interact_callback(), true);
+    assert.equal(npc.entries[1].can_interact_callback(), true);
+  }
+  const previous = replacement.entries;
+  replacement.entries = [
+    entry(replacement, 'talk', 'misc_local/talk', context.InputId.Interact),
+    entry(replacement, 'gift', 'misc_local/give_item', context.InputId.Throw),
+    ...previous.slice(2),
+  ];
+  replacement.interactions = interactionList(replacement.entries);
+  update();
+  assert.equal(replacement.entries.length, previous.length, 'same-sized replacement list is detected');
+  assert.equal(replacement.interactions.reads, replacement.entries.length);
+  assert.notEqual(replacement.entries[0].can_interact_callback, previous[0].can_interact_callback);
+  assert.equal(replacement.entries[0].__mistria_companion_mounted.npc, replacement);
+  assert.equal(replacement.__mistria_companion_mounted.list, replacement.interactions);
+  assert.equal(warnings.length, 0);
+});
+
+test('mounted disabled updater leaves native entries untouched and installs when enabled later', () => {
+  const { makeNpc, runtime, update, warnings } = mountedHarness();
+  const npc = makeNpc();
+  const original = npc.entries.map(entry => ({ ...entry }));
+  runtime.mounted_interactions_enabled = false;
+  update();
+  assert.deepEqual(npc.entries, original);
+  assert.equal(npc.interactions.reads, 0);
+  assert.equal(npc.__mistria_companion_mounted, undefined);
+  runtime.mounted_interactions_enabled = true;
+  update();
+  assert.notEqual(npc.entries[0].can_interact_callback, original[0].can_interact_callback);
+  assert.notEqual(npc.entries[1].can_interact_callback, original[1].can_interact_callback);
+  assert.equal(warnings.length, 0);
+});
+
+test('mounted installer warns and preserves missing, duplicate, or wrong-input native entries', () => {
+  const variants = [
+    ['missing talk', (npc) => { npc.entries.splice(0, 1); }],
+    ['missing gift', (npc) => { npc.entries.splice(1, 1); }],
+    ['duplicate talk', (npc) => { npc.entries.push({ ...npc.entries[0] }); }],
+    ['duplicate gift', (npc) => { npc.entries.push({ ...npc.entries[1] }); }],
+    ['wrong talk input', (npc, h) => { npc.entries[0].input_id = h.context.InputId.Throw; }],
+    ['wrong gift input', (npc, h) => { npc.entries[1].input_id = h.context.InputId.Interact; }],
+    ['noncanonical Caldarus pair', (npc, h) => {
+      npc.npc_id = h.context.NpcId.Caldarus;
+      npc.entries.splice(2, 0, { ...npc.entries[0] });
+    }],
+    ['third Caldarus talk', (npc, h) => {
+      npc.npc_id = h.context.NpcId.Caldarus;
+      npc.entries.push({ ...npc.entries[0] }, { ...npc.entries[0] });
+    }],
+  ];
+  for (const [label, change] of variants) {
+    const harness = mountedHarness();
+    const npc = harness.makeNpc();
+    change(npc, harness);
+    const before = npc.entries.map(entry => ({ ...entry }));
+    harness.update();
+    assert.ok(harness.warnings.some(args => args[0].endsWith(':mounted_entries')), label);
+    for (const [index, entry] of npc.entries.entries()) {
+      const isTalk = entry.local_key === 'misc_local/talk' && entry.input_id === harness.context.InputId.Interact;
+      const isGift = entry.local_key === 'misc_local/give_item' && entry.input_id === harness.context.InputId.Throw;
+      const matching = npc.entries.filter(other =>
+        other.local_key === entry.local_key && other.input_id === entry.input_id).length;
+      if ((!isTalk && !isGift) || matching !== 1) {
+        assert.deepEqual(entry, before[index], `${label}: ambiguous or unrelated entry is unchanged`);
+      } else {
+        assert.notEqual(entry.can_interact_callback, before[index].can_interact_callback,
+          `${label}: unambiguous counterpart still works`);
+        assert.equal(entry.callback, before[index].callback);
+      }
+    }
+  }
+});
+
+test('mounted installer warns and leaves malformed list and callback shapes unchanged', () => {
+  for (const invalid of [undefined, null, 12, [], {}, { count: 2, get() {} }, { count() { return 2; }, get: [] }]) {
+    const { makeNpc, update, warnings } = mountedHarness();
+    const npc = makeNpc();
+    const entries = npc.entries.map(entry => ({ ...entry }));
+    npc.interactions = invalid;
+    update();
+    assert.equal(npc.interactions, invalid);
+    assert.deepEqual(npc.entries, entries);
+    assert.equal(npc.__mistria_companion_mounted, undefined);
+    assert.ok(warnings.some(args => args[0].endsWith(':mounted_list')));
+  }
+  for (const key of ['can_interact_callback', 'callback']) {
+    for (const value of [undefined, null, 0, 'method', {}]) {
+      for (const index of [0, 1]) {
+        const { makeNpc, update, warnings } = mountedHarness();
+        const npc = makeNpc();
+        npc.entries[index][key] = value;
+        const before = { ...npc.entries[index] };
+        update();
+        assert.deepEqual(npc.entries[index], before);
+        assert.equal(npc.entries[index].__mistria_companion_mounted, undefined);
+        assert.ok(warnings.some(args => args[0].endsWith(':mounted_callback')));
+        assert.ok(npc.entries[1 - index].__mistria_companion_mounted, 'valid counterpart is not discarded');
+      }
+    }
+  }
+});
+
+test('mounted updater retries uninitialized NPCs and lists once their native interactions become available', () => {
+  for (const missing of ['me', 'fsm', 'interactions']) {
+    const { makeNpc, update, warnings } = mountedHarness();
+    const npc = makeNpc();
+    const saved = npc[missing];
+    const before = npc.entries.map(entry => ({ ...entry }));
+    delete npc[missing];
+    update();
+    update();
+    assert.deepEqual(npc.entries, before);
+    assert.equal(npc.__mistria_companion_mounted, undefined);
+    if (missing !== 'interactions') assert.equal(warnings.length, 0, 'early initialization is not malformed data');
+    npc[missing] = saved;
+    update();
+    assert.ok(npc.entries[0].__mistria_companion_mounted);
+    assert.ok(npc.entries[1].__mistria_companion_mounted);
+  }
 });
 
 function wikiHarness() {
@@ -730,12 +1313,17 @@ test('tick retries initialization, resets visit/day observations, and throttles 
   let day = '1';
   let scans = 0;
   let refreshes = 0;
+  let mountedUpdates = 0;
   const grid = { node_counter: 1 };
   const context = load([publicName('reset_save'), publicName('tick')], {
     GRID: grid,
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_register_hotkeys: () => {},
     MistriaCompanion_update_settings_keybinds: () => {},
+    MistriaCompanion_update_mounted_interactions: () => {
+      assert.equal(ready, true, 'mounted initialization must wait until the world is ready');
+      mountedUpdates++;
+    },
     __MistriaCompanion_ready: () => ready,
     local_language: () => 'en',
     __MistriaCompanion_legendary_day_key: () => day,
@@ -755,12 +1343,15 @@ test('tick retries initialization, resets visit/day observations, and throttles 
   const tick = context.MistriaCompanion_tick;
   tick();
   assert.equal(scans, 0);
+  assert.equal(mountedUpdates, 0);
   ready = true;
   tick();
   assert.equal(scans, 1);
+  assert.equal(mountedUpdates, 1);
   assert.equal(refreshes, 1);
   runtime.seen_spawns.fish = true;
   for (let i = 0; i < 11; i++) tick();
+  assert.equal(mountedUpdates, 12, 'mounted NPC discovery is not throttled with map scans');
   assert.equal(scans, 1);
   assert.equal(refreshes, 1);
   assert.equal(runtime.seen_spawns.fish, true);
@@ -775,4 +1366,8 @@ test('tick retries initialization, resets visit/day observations, and throttles 
   tick();
   assert.equal(runtime.legendary_sightings.length, 0);
   assert.equal(scans, 3);
+  const mountedBeforeTitle = mountedUpdates;
+  ready = false;
+  tick();
+  assert.equal(mountedUpdates, mountedBeforeTitle, 'returning to an unready/title state skips NPC access');
 });
