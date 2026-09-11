@@ -107,7 +107,10 @@ function seedMakerHarness() {
       raw_keyboard: [0], raw_mouse: [0], raw_gp_buttons: [0],
     },
     game_paused: () => game.paused,
-    instance_exists: instance => instance?.exists === true,
+    instance_exists: instance => {
+      assert.notEqual(instance, undefined, 'native instance_exists requires an instance, not undefined');
+      return instance.exists === true;
+    },
     INTERACTABLES: { count: () => entries.length, get: index => entries[index] },
     mmapi_warn_rate_limited: (...args) => logs.push(args),
     mmapi_check_guards: (hook, ctx) => {
@@ -1623,9 +1626,16 @@ test('gift highlight nodes sit behind native text, reuse layout, and refresh wit
     font_line_height: () => 12,
     string_width_font: text => text.length * 4,
     ANCHOR: {
-      positional: parent => { rootsCreated++; return { parent }; },
+      positional: parent => {
+        rootsCreated++;
+        return Object.assign(new Node(), {
+          parent, x: 0, y: 0, max_alpha: 1, cache_x: 0, cache_y: 0, cache_alpha: 1,
+          cache_is_dirty: false,
+        });
+      },
       nine_slice: (parent, z) => {
-        const node = Object.assign(new HighlightNode(), { parent, z });
+        const node = Object.assign(new HighlightNode(), { parent, z, cache_is_dirty: true });
+        parent.children.push(node);
         markers.push(node);
         return node;
       },
@@ -1634,6 +1644,7 @@ test('gift highlight nodes sit behind native text, reuse layout, and refresh wit
   });
   const body = Object.assign(new Node(), {
     display_text: h.describe(''), width: 120, z: -10, text_align: 0,
+    cache_x: 400, cache_y: 250, cache_alpha: 0.6, max_alpha: 1, cache_is_dirty: false,
     get_font: () => 'standard',
     get_line_height: () => undefined,
   });
@@ -1646,17 +1657,45 @@ test('gift highlight nodes sit behind native text, reuse layout, and refresh wit
   assert.equal(marker.z, body.z + 0.5, 'background is behind text and above its parent panel');
   assert.equal(marker.alpha, 0.45);
   assert.deepEqual(marker.color, [77, 190, 206]);
+
+  // Anchor only initializes a node's position/alpha when cache_is_dirty is true.
+  function computeCache(node) {
+    if (node.cache_is_dirty) {
+      node.cache_x = node.x + node.parent.cache_x;
+      node.cache_y = node.y + node.parent.cache_y;
+      node.cache_alpha = node.alpha * node.parent.cache_alpha / node.parent.max_alpha;
+      node.cache_is_dirty = false;
+      for (const child of node.children) child.cache_is_dirty = true;
+    }
+    for (const child of node.children) computeCache(child);
+  }
+  computeCache(marker.parent);
+  assert.deepEqual([marker.cache_x, marker.cache_y], [467, 263],
+    'a highlight added after the shop tooltip is laid out must use its screen position, not (0, 0)');
+  assert.equal(marker.cache_alpha, 0.27, 'inherit the tooltip fade instead of starting fully visible');
   update();
   assert.equal(rootsCreated, 1, 'unchanged hover does not allocate nodes every frame');
 
   h.npcs[2].gifts_given.clear();
   update();
   assert.equal(freed.length, 1);
+  assert.equal(freed[0].enabled, false, 'hide old highlights immediately while native deletion is pending');
   assert.equal(markers.length, 1, 'clearing history removes the old marker without a replacement');
   h.npcs[0].gifts_given.add(0);
+  body.cache_alpha = 0;
   update();
   assert.equal(markers.length, 2);
   assert.equal(markers[1].width, 22);
+  computeCache(markers[1].parent);
+  assert.equal(markers[1].cache_alpha, 0, 'new highlights inherit a hidden tooltip, not default alpha 1');
+  body.cache_x = 460;
+  body.cache_y = 280;
+  body.cache_alpha = 0.6;
+  markers[1].parent.cache_is_dirty = true;
+  computeCache(markers[1].parent);
+  assert.deepEqual([markers[1].cache_x, markers[1].cache_y], [499, 281],
+    'native parent invalidation keeps highlights attached after tooltip movement');
+  assert.equal(markers[1].cache_alpha, 0.27);
   body.display_text = 'Liked by: Balor\nLoved by: March,\nOlric';
   body.get_line_height = () => 16;
   h.npcs[2].gifts_given.add(0);
