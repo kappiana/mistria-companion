@@ -5,6 +5,7 @@ function __MistriaCompanion_runtime() {
             bindings: undefined,
             keybind_rows: [],
             mounted_interactions_enabled: true,
+            seed_repeat: undefined,
             frame: 0,
             clock_paused: false,
             recipe_cache: {},
@@ -69,6 +70,7 @@ function MistriaCompanion_reset_save(_ctx) {
     if (_label != undefined && !_label.freed) ANCHOR.free_node(_label);
     _runtime.museum_label = undefined;
     _runtime.clock_paused = false;
+    _runtime.seed_repeat = undefined;
     _runtime.recipe_cache = {};
     _runtime.wiki_title = "";
     _runtime.wiki_hint_title = "";
@@ -294,6 +296,226 @@ function MistriaCompanion_update_mounted_interactions() {
     for (var _index = 0; _index < instance_number(par_NPC); _index++) {
         var _npc = instance_find(par_NPC, _index);
         if (instance_exists(_npc)) __MistriaCompanion_install_mounted_npc(_npc);
+    }
+}
+
+function __MistriaCompanion_seed_repeat_ready() {
+    if (!instance_exists(obj_ari) || ARI == undefined || GRID == undefined
+        || game_paused() || MIST.running || ARI.fire_breath_time > 0
+        || ARI.held_animal_id != undefined || obj_ari.fsm.next_state != undefined)
+    {
+        return false;
+    }
+    var _state = obj_ari.fsm.current_state_id();
+    return _state == PlayerState.Default || _state == PlayerState.MountDefault;
+}
+
+function __MistriaCompanion_seed_interaction_index(_list) {
+    var _found = -1;
+    for (var _index = 0; _index < _list.count(); _index++) {
+        var _interaction = _list.get(_index);
+        if (__MistriaCompanion_field(_interaction, "input_id") != InputId.Interact) continue;
+        if (_found != -1
+            || __MistriaCompanion_field(_interaction, "local_key") != "misc_local/interact")
+        {
+            return -1;
+        }
+        _found = _index;
+    }
+    return _found;
+}
+
+function __MistriaCompanion_seed_context_valid(_context) {
+    var _renderer = _context.renderer;
+    return instance_exists(_renderer)
+        && _renderer.node == _context.node
+        && _context.node.object_id == ObjectId.SeedMaker
+        && _renderer.interactions == _context.list
+        && _context.list.count() == _context.count
+        && __MistriaCompanion_seed_interaction_index(_context.list) == _context.index
+        && _context.list.get(_context.index) == _context.interaction
+        && _context.interaction.callback == _context.callback
+        && _context.interaction.can_interact_callback == _context.condition
+        && _context.interaction.input_id == InputId.Interact
+        && _renderer.attempt_interact == _context.wrapper;
+}
+
+function __MistriaCompanion_seed_repeat_valid(_repeat) {
+    return __MistriaCompanion_seed_repeat_ready()
+        && __MistriaCompanion_seed_context_valid(_repeat.context)
+        && GRID == _repeat.grid
+        && obj_ari.id == _repeat.player
+        && obj_ari.x == _repeat.x && obj_ari.y == _repeat.y
+        && obj_ari.cardinal == _repeat.cardinal
+        && ARI.inventory == _repeat.inventory
+        && ARI.held_item_index == _repeat.slot_index
+        && ARI.held_item() == _repeat.item
+        && _repeat.item.item_id == _repeat.item_id
+        && _repeat.item.infusion == _repeat.infusion
+        && _repeat.inventory.slot(_repeat.slot_index).count > 0;
+}
+
+function __MistriaCompanion_seed_action() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _inventory = ARI.inventory;
+    var _slot_index = ARI.held_item_index;
+    var _slot = _inventory.slot(_slot_index);
+    var _item = _slot.item;
+    var _count = _slot.count;
+    _runtime.seed_repeat = undefined;
+    var _result = self.context.callback();
+    if (_item != undefined && _slot.item == _item && _slot.count > 0
+        && _slot.count == _count - 1 && _result != false
+        && __MistriaCompanion_seed_repeat_ready()
+        && __MistriaCompanion_seed_context_valid(self.context))
+    {
+        _runtime.seed_repeat = {
+            context: self.context,
+            grid: GRID,
+            player: obj_ari.id,
+            x: obj_ari.x, y: obj_ari.y, cardinal: obj_ari.cardinal,
+            inventory: _inventory,
+            slot_index: _slot_index,
+            item: _item, item_id: _item.item_id, infusion: _item.infusion,
+            last_frame: _runtime.frame,
+            next_frame: _runtime.frame + self.delay
+        };
+    }
+    return _result;
+}
+
+function __MistriaCompanion_seed_interact_held() {
+    if (INPUT.input_overrides[InputId.Interact]) return false;
+    if (INPUT.check(InputId.Interact)) return true;
+
+    // Native take_press keeps Muted until the next press; read On without unmuting it.
+    var _bindings = BINDINGS.bindings[InputId.Interact];
+    for (var _slot = 0; _slot < array_length(_bindings); _slot++) {
+        var _binding = _bindings[_slot];
+        if (_binding == undefined) continue;
+        var _keys;
+        var _statuses;
+        switch (_binding.type) {
+            case BindingType.Keyboard:
+                _keys = KEYBOARD_INPUTS;
+                _statuses = INPUT.raw_keyboard;
+                break;
+            case BindingType.Mouse:
+                _keys = MOUSE_BUTTONS;
+                _statuses = INPUT.raw_mouse;
+                break;
+            case BindingType.GamepadButton:
+                _keys = GAMEPAD_BUTTONS;
+                _statuses = INPUT.raw_gp_buttons;
+                break;
+            default:
+                continue;
+        }
+        var _index = array_index(_keys, _binding.keycode);
+        if (_index != undefined && _index >= 0 && _index < array_length(_statuses)
+            && has_flag(_statuses[_index], DigitalStatus.On)) return true;
+    }
+    return false;
+}
+
+function __MistriaCompanion_seed_attempt(_force_press=false) {
+    var _held = __MistriaCompanion_seed_interact_held();
+    var _callback = self.original(_force_press);
+    var _runtime = __MistriaCompanion_runtime();
+    if (_force_press || !_held || !__MistriaCompanion_seed_repeat_ready()
+        || !__MistriaCompanion_seed_context_valid(self))
+    {
+        _runtime.seed_repeat = undefined;
+        return _callback;
+    }
+    if (_callback != undefined) {
+        _runtime.seed_repeat = undefined;
+        if (_callback != self.callback) return _callback;
+        return method({ context: self, delay: 30 }, __MistriaCompanion_seed_action);
+    }
+    var _repeat = _runtime.seed_repeat;
+    if (_repeat == undefined) return undefined;
+    if (_repeat.context != self || !__MistriaCompanion_seed_repeat_valid(_repeat)
+        || _runtime.frame - _repeat.last_frame > 1)
+    {
+        _runtime.seed_repeat = undefined;
+        return undefined;
+    }
+    if (_repeat.last_frame == _runtime.frame) return undefined;
+    _repeat.last_frame = _runtime.frame;
+    if (_runtime.frame < _repeat.next_frame) return undefined;
+    if (self.condition() == false
+        || mmapi_check_guards("input.take_press", {
+            subject: self.renderer, input_id: InputId.Interact,
+            local_key: self.interaction.local_key, interaction: self.interaction
+        }) == false)
+    {
+        _runtime.seed_repeat = undefined;
+        return undefined;
+    }
+    return method({ context: self, delay: 12 }, __MistriaCompanion_seed_action);
+}
+
+function __MistriaCompanion_install_seed_maker(_renderer) {
+    if (__MistriaCompanion_field(_renderer, "__mistria_companion_seed_repeat") != undefined) return;
+    var _list = __MistriaCompanion_field(_renderer, "interactions");
+    if (_list == undefined) return;
+    if (typeof(__MistriaCompanion_field(_list, "count")) != "method"
+        || typeof(__MistriaCompanion_field(_list, "get")) != "method")
+    {
+        mmapi_warn_rate_limited("mistria_item_details:seed_list", "mistria_item_details",
+            "Seed Maker repeat: unsupported interaction list; leaving normal controls unchanged.");
+        return;
+    }
+    if (_list.count() == 0) return;
+    // Seed Makers also have a native SecondaryInteract / Inspect entry.
+    var _index = __MistriaCompanion_seed_interaction_index(_list);
+    if (_index == -1) {
+        mmapi_warn_rate_limited("mistria_item_details:seed_entries", "mistria_item_details",
+            "Seed Maker repeat: expected one primary Interact action in "
+            + string(_list.count()) + " entries; leaving normal controls unchanged.");
+        return;
+    }
+    var _interaction = _list.get(_index);
+    if (typeof(__MistriaCompanion_field(_interaction, "callback")) != "method"
+        || typeof(__MistriaCompanion_field(_interaction, "can_interact_callback")) != "method"
+        || typeof(__MistriaCompanion_field(_renderer, "attempt_interact")) != "method")
+    {
+        mmapi_warn_rate_limited("mistria_item_details:seed_callback", "mistria_item_details",
+            "Seed Maker repeat: unsupported callbacks (action="
+            + typeof(__MistriaCompanion_field(_interaction, "callback"))
+            + ", condition=" + typeof(__MistriaCompanion_field(_interaction, "can_interact_callback"))
+            + ", dispatcher=" + typeof(__MistriaCompanion_field(_renderer, "attempt_interact"))
+            + "); leaving normal controls unchanged.");
+        return;
+    }
+    var _context = {
+        renderer: _renderer, node: _renderer.node, list: _list,
+        interaction: _interaction, index: _index, count: _list.count(),
+        callback: _interaction.callback, condition: _interaction.can_interact_callback,
+        original: _renderer.attempt_interact
+    };
+    _context.wrapper = method(_context, __MistriaCompanion_seed_attempt);
+    _renderer.__mistria_companion_seed_repeat = _context;
+    _renderer.attempt_interact = _context.wrapper;
+}
+
+function MistriaCompanion_update_seed_makers() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _repeat = _runtime.seed_repeat;
+    if (_repeat != undefined && (!__MistriaCompanion_seed_repeat_valid(_repeat)
+        || _runtime.frame - _repeat.last_frame > 1))
+    {
+        _runtime.seed_repeat = undefined;
+    }
+    // Only the game's chosen interactable can dispatch a repeat.
+    for (var _index = 0; _index < INTERACTABLES.count(); _index++) {
+        var _renderer = INTERACTABLES.get(_index);
+        if (!instance_exists(_renderer) || _renderer.object_index != obj_node_renderer) continue;
+        var _node = __MistriaCompanion_field(_renderer, "node");
+        if (__MistriaCompanion_field(_node, "object_id") == ObjectId.SeedMaker) {
+            __MistriaCompanion_install_seed_maker(_renderer);
+        }
     }
 }
 
@@ -2328,12 +2550,14 @@ function MistriaCompanion_tick() {
     __MistriaCompanion_register_hotkeys();
     MistriaCompanion_update_settings_keybinds();
     if (!__MistriaCompanion_ready()) {
+        _runtime.seed_repeat = undefined;
         _runtime.wiki_title = "";
         _runtime.wiki_hint_title = "";
         __MistriaCompanion_update_museum_label(undefined);
         return;
     }
     MistriaCompanion_update_mounted_interactions();
+    MistriaCompanion_update_seed_makers();
     var _language = local_language();
     if (_runtime.language != _language) {
         _runtime.language = _language;
@@ -2396,5 +2620,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.41");
+mmapi_mod_declare("mistria_item_details", "1.0.42");
 MistriaCompanion_register();

@@ -63,6 +63,477 @@ const searchNames = [
 ].map(privateName);
 const search = load(searchNames);
 
+function seedMakerHarness() {
+  const runtime = { frame: 0 };
+  const input = { held: false, pressed: false, muted: false };
+  const game = { paused: false, state: 'default', eligible: true, allowPress: true, consume: true };
+  const entries = [];
+  const logs = [];
+  const guards = [];
+  const conversions = [];
+  const inspections = [];
+  const item = { item_id: 17, infusion: 0 };
+  const slots = [{ item, count: 100 }, { item: { ...item }, count: 100 }];
+  const player = { id: 1, x: 100, y: 120, cardinal: 0, exists: true };
+  player.fsm = { current_state_id: () => game.state };
+  const context = load([
+    'seed_repeat_ready', 'seed_interaction_index', 'seed_context_valid', 'seed_repeat_valid',
+    'seed_action', 'seed_interact_held', 'seed_attempt', 'install_seed_maker',
+  ].map(privateName).concat([publicName('update_seed_makers'), publicName('reset_save')]), {
+    __MistriaCompanion_runtime: () => runtime,
+    obj_ari: player, obj_node_renderer: 'renderer',
+    ARI: {
+      inventory: { slot: index => slots[index] }, held_item_index: 0,
+      held_item: () => slots[context.ARI.held_item_index].item,
+      fire_breath_time: 0,
+    },
+    GRID: {},
+    MIST: { running: false },
+    PlayerState: { Default: 'default', MountDefault: 'mounted' },
+    ObjectId: { SeedMaker: 'seed-maker' },
+    InputId: { Interact: 'interact', SecondaryInteract: 'inspect' },
+    BindingType: { Keyboard: 'keyboard', Mouse: 'mouse', GamepadButton: 'pad', GamepadAxis: 'axis' },
+    DigitalStatus: { On: 1, Muted: 8 },
+    KEYBOARD_INPUTS: [69], MOUSE_BUTTONS: [1], GAMEPAD_BUTTONS: [100],
+    BINDINGS: { bindings: { interact: [{ type: 'keyboard', keycode: 69 }] } },
+    array_index: (values, value) => {
+      const index = values.indexOf(value);
+      return index < 0 ? undefined : index;
+    },
+    has_flag: (value, flag) => (value & flag) !== 0,
+    INPUT: {
+      check: id => { assert.equal(id, 'interact'); return input.held && !input.muted; },
+      input_overrides: { interact: false },
+      raw_keyboard: [0], raw_mouse: [0], raw_gp_buttons: [0],
+    },
+    game_paused: () => game.paused,
+    instance_exists: instance => instance?.exists === true,
+    INTERACTABLES: { count: () => entries.length, get: index => entries[index] },
+    mmapi_warn_rate_limited: (...args) => logs.push(args),
+    mmapi_check_guards: (hook, ctx) => {
+      assert.equal(hook, 'input.take_press');
+      guards.push(ctx);
+      return game.allowPress;
+    },
+  });
+  function makeRenderer(objectId = 'seed-maker') {
+    const renderer = { exists: true, object_index: 'renderer', node: { object_id: objectId } };
+    const callback = context.method(renderer, () => {
+      assert.equal(context.self, renderer, 'keep the native callback bound to its renderer');
+      if (!game.consume) return false;
+      const slot = slots[context.ARI.held_item_index];
+      assert.ok(slot.count > 0, 'never pop an empty slot');
+      conversions.push({ renderer, item: slot.item, frame: runtime.frame });
+      if (--slot.count === 0) slot.item = undefined;
+      return game.result;
+    });
+    const condition = context.method(renderer, () => game.eligible
+      && context.ARI.held_item()?.item_id === 17);
+    // Furniture.gml registers both the Seed Maker's conversion and its Inspect action.
+    const interactions = [{
+      input_id: 'interact', local_key: 'misc_local/interact', callback,
+      can_interact_callback: condition,
+    }, {
+      input_id: 'inspect', local_key: 'misc_local/inspect',
+      callback: context.method(renderer, () => {
+        assert.equal(context.self, renderer);
+        inspections.push(renderer);
+        return game.inspectResult;
+      }),
+      can_interact_callback: () => true,
+    }];
+    renderer.interactions = { count: () => interactions.length, get: index => interactions[index] };
+    renderer.attempt_interact = context.method(renderer, force => {
+      assert.equal(context.self, renderer, 'keep the native dispatcher bound to its renderer');
+      if (context.ARI.fire_breath_time > 0) return undefined;
+      let output;
+      for (const entry of interactions) {
+        if (!entry.can_interact_callback()) continue;
+        const secondary = entry.input_id === 'inspect';
+        const pressed = secondary ? input.inspectPressed && !input.inspectMuted
+          : input.pressed && !input.muted;
+        if (pressed) {
+          input[secondary ? 'inspectMuted' : 'muted'] = true;
+          if (!secondary) context.INPUT.raw_keyboard[0] |= context.DigitalStatus.Muted;
+        }
+        if ((pressed && context.mmapi_check_guards('input.take_press', {
+          subject: renderer, input_id: entry.input_id, local_key: entry.local_key, interaction: entry,
+        }) !== false) || force) {
+          output = entry.callback;
+          force = false;
+        }
+      }
+      return output;
+    });
+    renderer.entries = interactions;
+    entries.push(renderer);
+    return renderer;
+  }
+  const renderer = makeRenderer();
+  const original = renderer.attempt_interact;
+  const update = () => context.MistriaCompanion_update_seed_makers();
+  update();
+  function frame({
+    pressed = false, held = true, selected = renderer, force = false, after = false, inspectPressed = false,
+  } = {}) {
+    Object.assign(input, { pressed, held, inspectPressed, inspectMuted: false });
+    // Input.begin_frame preserves keyboard Muted until a new press, including while held.
+    if (pressed) input.muted = false;
+    context.INPUT.raw_keyboard[0] = (held ? context.DigitalStatus.On : 0)
+      | (input.muted ? context.DigitalStatus.Muted : 0);
+    runtime.frame++;
+    if (!after) update();
+    let result;
+    if (selected) {
+      const callback = selected.attempt_interact(force);
+      if (callback !== undefined) result = callback();
+    }
+    if (after) update();
+    return result;
+  }
+  const advance = (count, options) => { for (let i = 0; i < count; i++) frame(options); };
+  return { context, runtime, input, game, player, renderer, original, entries, slots,
+    logs, guards, conversions, inspections, makeRenderer, frame, advance, update };
+}
+
+test('Seed Maker taps stay single and held input repeats at exactly 30 then 12 frame intervals', () => {
+  for (const after of [false, true]) {
+    const h = seedMakerHarness();
+    assert.equal(h.frame({ pressed: true, after }), undefined, 'preserve native undefined success return');
+    assert.equal(h.input.muted, true, 'native press consumption still happens');
+    assert.ok(h.runtime.seed_repeat, 'the consumed press must still arm the hold');
+    h.advance(29, { after });
+    assert.equal(h.conversions.length, 1);
+    h.frame({ after });
+    assert.deepEqual(h.conversions.map(entry => entry.frame), [1, 31]);
+    h.advance(11, { after });
+    assert.equal(h.conversions.length, 2);
+    h.frame({ after });
+    assert.deepEqual(h.conversions.map(entry => entry.frame), [1, 31, 43]);
+    h.frame({ held: false, after });
+    assert.equal(h.runtime.seed_repeat, undefined);
+    h.advance(60, { after });
+    assert.equal(h.conversions.length, 3, 'holding again without a fresh press does not restart');
+    h.frame({ pressed: true, after });
+    h.frame({ held: false, after });
+    h.advance(60, { held: false, after });
+    assert.equal(h.conversions.length, 4, 'a tap never repeats');
+  }
+});
+
+test('native Seed Maker Interact and Inspect coexist without disabling repetition', () => {
+  const h = seedMakerHarness();
+  assert.deepEqual(h.renderer.entries.map(entry => [entry.input_id, entry.local_key]), [
+    ['interact', 'misc_local/interact'], ['inspect', 'misc_local/inspect'],
+  ]);
+  assert.notEqual(h.renderer.attempt_interact, h.original);
+  assert.equal(h.logs.length, 0);
+  h.frame({ pressed: true });
+  h.advance(54);
+  assert.deepEqual(h.conversions.map(entry => entry.frame), [1, 31, 43, 55]);
+  assert.equal(h.inspections.length, 0);
+});
+
+test('Seed Maker held bindings ignore native mute without clearing it or bypassing overrides', () => {
+  const h = seedMakerHarness();
+  const held = h.context.__MistriaCompanion_seed_interact_held;
+  h.frame({ pressed: true });
+  assert.equal(h.context.INPUT.check('interact'), false);
+  assert.equal(held(), true);
+  const mutedOn = h.context.DigitalStatus.Muted | h.context.DigitalStatus.On;
+  assert.equal(h.context.INPUT.raw_keyboard[0], mutedOn, 'do not restore pressed or clear mute');
+  h.advance(30);
+  assert.equal(h.conversions.length, 2);
+  assert.equal(h.context.INPUT.raw_keyboard[0], mutedOn);
+  h.context.INPUT.input_overrides.interact = true;
+  assert.equal(held(), false, 'explicit input suppression still blocks repetition');
+  h.frame();
+  assert.equal(h.runtime.seed_repeat, undefined);
+  h.context.INPUT.input_overrides.interact = false;
+  h.advance(60);
+  assert.equal(h.conversions.length, 2, 'lifting suppression does not restart a hold');
+  h.frame({ held: false });
+  assert.equal(held(), false);
+  assert.equal(h.context.INPUT.raw_keyboard[0], h.context.DigitalStatus.Muted);
+});
+
+test('Seed Maker held lookup follows keyboard, mouse, and controller Interact remappings', () => {
+  const h = seedMakerHarness();
+  const held = h.context.__MistriaCompanion_seed_interact_held;
+  const mutedOn = h.context.DigitalStatus.On | h.context.DigitalStatus.Muted;
+  for (const [type, keycode, raw] of [
+    ['keyboard', 69, 'raw_keyboard'], ['mouse', 1, 'raw_mouse'], ['pad', 100, 'raw_gp_buttons'],
+  ]) {
+    h.context.BINDINGS.bindings.interact = [undefined, { type, keycode }];
+    h.context.INPUT[raw][0] = mutedOn;
+    assert.equal(held(), true, type);
+    assert.equal(h.context.INPUT[raw][0], mutedOn);
+    h.context.INPUT[raw][0] = h.context.DigitalStatus.Muted;
+    assert.equal(held(), false, `${type} release or disconnect`);
+    h.context.INPUT[raw][0] = 0;
+  }
+  h.context.KEYBOARD_INPUTS.push(70);
+  h.context.INPUT.raw_keyboard = [mutedOn, 0];
+  h.context.BINDINGS.bindings.interact = [{ type: 'keyboard', keycode: 70 }];
+  assert.equal(held(), false, 'holding E does nothing after Interact is remapped to F');
+  h.context.INPUT.raw_keyboard[1] = mutedOn;
+  assert.equal(held(), true);
+  h.context.INPUT.raw_keyboard[1] = 0;
+  h.context.BINDINGS.bindings.interact = [];
+  assert.equal(held(), false, 'unbound Interact does not use a hard-coded key');
+  h.context.BINDINGS.bindings.interact = [{ type: 'axis', keycode: 200 }];
+  h.context.INPUT.check = () => true;
+  assert.equal(held(), true, 'unmuted axis bindings keep the native input result');
+});
+
+test('native Seed Maker Inspect retains its callback and cancels rather than joining a held conversion', () => {
+  const h = seedMakerHarness();
+  const inspect = h.renderer.entries[1].callback;
+  const result = { inspection: true };
+  h.game.inspectResult = result;
+  assert.equal(h.frame({ held: false, inspectPressed: true }), result);
+  assert.equal(h.inspections.length, 1);
+  assert.equal(h.conversions.length, 0);
+  assert.equal(h.runtime.seed_repeat, undefined);
+  assert.equal(h.renderer.entries[1].callback, inspect);
+
+  h.frame({ pressed: true });
+  h.advance(29);
+  assert.equal(h.frame({ inspectPressed: true }), result, 'Inspect takes priority on a repeat-due frame');
+  assert.equal(h.inspections.length, 2);
+  assert.equal(h.conversions.length, 1);
+  assert.equal(h.runtime.seed_repeat, undefined);
+  h.advance(60);
+  assert.equal(h.conversions.length, 1);
+});
+
+test('Seed Maker conversion lookup is independent of the Inspect entry ordering', () => {
+  const h = seedMakerHarness();
+  const renderer = h.makeRenderer();
+  renderer.entries.reverse();
+  h.update();
+  h.frame({ pressed: true, selected: renderer });
+  h.advance(42, { selected: renderer });
+  assert.equal(h.conversions.length, 3);
+  assert.equal(h.inspections.length, 0);
+  assert.equal(h.logs.length, 0);
+});
+
+test('Seed Maker repeat starts only after a successful native conversion, never from holding nearby', () => {
+  const h = seedMakerHarness();
+  h.advance(90);
+  assert.equal(h.conversions.length, 0);
+  h.game.consume = false;
+  assert.equal(h.frame({ pressed: true }), false);
+  assert.equal(h.runtime.seed_repeat, undefined);
+  h.game.consume = true;
+  h.advance(60);
+  assert.equal(h.conversions.length, 0);
+  h.game.result = true;
+  assert.equal(h.frame({ pressed: true }), true);
+  assert.equal(h.conversions.length, 1);
+});
+
+test('Seed Maker repeat stops on the last selected item and never uses another stack', () => {
+  const h = seedMakerHarness();
+  h.slots[0].count = 3;
+  h.frame({ pressed: true });
+  h.advance(100);
+  assert.equal(h.conversions.length, 3);
+  assert.equal(h.slots[0].item, undefined);
+  assert.equal(h.slots[1].count, 100);
+  assert.equal(h.runtime.seed_repeat, undefined);
+  h.slots[0] = { item: { item_id: 17, infusion: 0 }, count: 20 };
+  h.advance(60);
+  assert.equal(h.conversions.length, 3, 'refilling an empty slot does not restart an old hold');
+});
+
+test('Seed Maker holds cancel on movement, selection changes, pause, transitions, and invalid targets', () => {
+  const scenarios = {
+    move: h => { h.player.x++; },
+    turn: h => { h.player.cardinal++; },
+    slot: h => { h.context.ARI.held_item_index = 1; },
+    item: h => { h.slots[0].item = { item_id: 17, infusion: 0 }; },
+    variant: h => { h.slots[0].item.infusion = 2; },
+    menu: h => { h.game.paused = true; },
+    cutscene: h => { h.context.MIST.running = true; },
+    jump: h => { h.game.state = 'jump'; },
+    pendingState: h => { h.player.fsm.next_state = 'transition'; },
+    fireBreath: h => { h.context.ARI.fire_breath_time = 10; },
+    animal: h => { h.context.ARI.held_animal_id = 2; },
+    area: h => { h.context.GRID = {}; },
+    removed: h => { h.renderer.exists = false; },
+    replaced: h => { h.renderer.node = { object_id: 'seed-maker' }; },
+    changedObject: h => { h.renderer.node.object_id = 'chest'; },
+    inventory: h => { h.context.ARI.inventory = { slot: index => h.slots[index] }; },
+    player: h => { h.player.id = 2; },
+  };
+  for (const [name, change] of Object.entries(scenarios)) {
+    const h = seedMakerHarness();
+    h.frame({ pressed: true });
+    h.advance(10);
+    change(h);
+    h.frame({ selected: null });
+    assert.equal(h.runtime.seed_repeat, undefined, name);
+    h.advance(40, { selected: null });
+    assert.equal(h.conversions.length, 1, name);
+  }
+});
+
+test('leaving the selected Seed Maker even for a frame cancels rather than resuming on return', () => {
+  const h = seedMakerHarness();
+  h.frame({ pressed: true });
+  h.advance(20);
+  h.frame({ selected: null });
+  h.advance(60);
+  assert.equal(h.conversions.length, 1);
+  const second = h.makeRenderer();
+  h.update();
+  h.frame({ pressed: true });
+  h.frame({ selected: second });
+  h.advance(60, { selected: second });
+  assert.equal(h.conversions.length, 2, 'moving between Seed Makers does not transfer the hold');
+});
+
+test('Seed Maker repeated conversions respect native eligibility and input guard vetoes', () => {
+  for (const flag of ['eligible', 'allowPress']) {
+    const h = seedMakerHarness();
+    h.frame({ pressed: true });
+    h.advance(29);
+    h.game[flag] = false;
+    h.frame();
+    assert.equal(h.runtime.seed_repeat, undefined);
+    assert.equal(h.conversions.length, 1);
+    h.game[flag] = true;
+    h.advance(60);
+    assert.equal(h.conversions.length, 1, 'lifting a restriction requires a new press');
+  }
+  const h = seedMakerHarness();
+  h.frame({ pressed: true });
+  h.advance(30);
+  assert.equal(h.guards.length, 2);
+  for (const guard of h.guards) {
+    assert.equal(guard.subject, h.renderer);
+    assert.equal(guard.interaction, h.renderer.entries[0]);
+    assert.equal(guard.local_key, 'misc_local/interact');
+    assert.equal(guard.input_id, 'interact');
+  }
+});
+
+test('Seed Maker normal and forced presses preserve native behavior without arming forced repeats', () => {
+  const h = seedMakerHarness();
+  h.game.allowPress = false;
+  h.frame({ pressed: true });
+  h.advance(60);
+  assert.equal(h.conversions.length, 0);
+  h.frame({ force: true });
+  h.advance(60);
+  assert.equal(h.conversions.length, 1);
+  assert.equal(h.runtime.seed_repeat, undefined);
+  h.game.allowPress = true;
+  h.game.state = 'mounted';
+  h.frame({ pressed: true });
+  h.advance(30);
+  assert.equal(h.conversions.length, 3, 'the native mounted interaction can repeat too');
+});
+
+test('Seed Maker wrappers do not alter other interactables and leave foreign replacements alone', () => {
+  const h = seedMakerHarness();
+  const wrapped = h.renderer.attempt_interact;
+  const callback = h.renderer.entries[0].callback;
+  h.update();
+  h.update();
+  assert.equal(h.renderer.attempt_interact, wrapped);
+  assert.equal(h.renderer.entries[0].callback, callback);
+  const chest = h.makeRenderer('chest');
+  const chestOriginal = chest.attempt_interact;
+  const npc = h.makeRenderer();
+  npc.object_index = 'npc';
+  const npcOriginal = npc.attempt_interact;
+  h.entries.push(undefined, { exists: false });
+  h.update();
+  assert.equal(chest.attempt_interact, chestOriginal);
+  assert.equal(npc.attempt_interact, npcOriginal);
+  h.frame({ pressed: true });
+  const foreign = () => undefined;
+  h.renderer.attempt_interact = foreign;
+  h.update();
+  assert.equal(h.renderer.attempt_interact, foreign);
+  assert.equal(h.runtime.seed_repeat, undefined);
+});
+
+test('Seed Maker unsupported interaction layouts warn; late initialization and new makers are retried', () => {
+  const h = seedMakerHarness();
+  const late = h.makeRenderer();
+  const original = late.attempt_interact;
+  const entries = late.entries.splice(0);
+  h.update();
+  assert.equal(late.attempt_interact, original);
+  late.entries.push(...entries);
+  h.update();
+  assert.notEqual(late.attempt_interact, original);
+
+  for (const mutate of [
+    maker => { maker.entries.push({ ...maker.entries[0] }); },
+    maker => { maker.entries[0].input_id = 'secondary'; },
+    maker => { maker.entries[0].local_key = 'misc_local/inspect'; },
+    maker => { maker.entries[0].callback = undefined; },
+    maker => { maker.entries[0].can_interact_callback = undefined; },
+    maker => { maker.interactions = {}; },
+  ]) {
+    const maker = h.makeRenderer();
+    const before = maker.attempt_interact;
+    mutate(maker);
+    const warnings = h.logs.length;
+    h.update();
+    assert.equal(maker.attempt_interact, before);
+    assert.ok(h.logs.length > warnings);
+  }
+});
+
+test('Seed Maker repeat never catches up with a burst or retains a hold across a save reset', () => {
+  const h = seedMakerHarness();
+  h.frame({ pressed: true });
+  h.runtime.frame += 100;
+  h.frame();
+  assert.equal(h.conversions.length, 1);
+  h.frame({ pressed: true });
+  h.context.MistriaCompanion_reset_save({});
+  assert.equal(h.runtime.seed_repeat, undefined);
+  h.advance(60);
+  assert.equal(h.conversions.length, 2);
+});
+
+test('changed Seed Maker callbacks and interaction lists cancel holds without overwriting replacements', () => {
+  for (const replace of [
+    h => { h.renderer.entries[0].callback = () => false; },
+    h => { h.renderer.entries[0].can_interact_callback = () => false; },
+    h => { h.renderer.entries[0].input_id = 'secondary'; },
+    h => { h.renderer.entries[1].input_id = 'interact'; },
+    h => { h.renderer.entries.push({ ...h.renderer.entries[0] }); },
+    h => { h.renderer.interactions = { count: () => 0, get: () => undefined }; },
+  ]) {
+    const h = seedMakerHarness();
+    h.frame({ pressed: true });
+    replace(h);
+    h.update();
+    assert.equal(h.runtime.seed_repeat, undefined);
+    h.advance(60, { selected: null });
+    assert.equal(h.conversions.length, 1);
+  }
+});
+
+test('rapid Seed Maker taps reset the hold delay instead of adding an extra repeated conversion', () => {
+  const h = seedMakerHarness();
+  h.frame({ pressed: true });
+  h.advance(28);
+  h.frame({ pressed: true });
+  h.advance(29);
+  assert.deepEqual(h.conversions.map(entry => entry.frame), [1, 30]);
+  h.frame();
+  assert.deepEqual(h.conversions.map(entry => entry.frame), [1, 30, 60]);
+});
+
 function makeState(candidates, groups, birthdays, freeSlots, limit = 2048) {
   return {
     npc_ids: candidates.map((_, i) => i),
@@ -1946,6 +2417,7 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     __MistriaCompanion_register_hotkeys: () => {},
     MistriaCompanion_update_settings_keybinds: () => {},
     MistriaCompanion_update_gift_tooltips: () => { assert.equal(ready, true); },
+    MistriaCompanion_update_seed_makers: () => { assert.equal(ready, true); },
     MistriaCompanion_update_mounted_interactions: () => {
       assert.equal(ready, true, 'mounted initialization must wait until the world is ready');
       mountedUpdates++;
@@ -1968,7 +2440,9 @@ test('tick retries initialization, resets visit/day observations, and throttles 
   context.MistriaCompanion_reset_save({});
   runtime.frame = 0;
   const tick = context.MistriaCompanion_tick;
+  runtime.seed_repeat = { stale: true };
   tick();
+  assert.equal(runtime.seed_repeat, undefined, 'unready gameplay must cancel Seed Maker holds');
   assert.equal(scans, 0);
   assert.equal(mountedUpdates, 0);
   ready = true;

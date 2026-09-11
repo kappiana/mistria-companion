@@ -7,6 +7,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Shows compact cooking or crafting recipe summaries for a hovered item.
 - Lists met villagers who like or love the actual hovered item, including its infusion and special-item gift rules, and highlights names when you have already given them that item.
 - Adds a chest button that grabs one loved gift for each met villager who has not received a gift that day, prioritizing birthdays and available backpack space.
+- Repeats Seed Maker conversions while Interact is held, using the selected stack and normal seed yields.
 - Allows ordinary villager conversations, gifting, and Elsie's Gossip while riding your mount, using the normal controls.
 - Copies relevant Fields of Mistria Wiki links for items, villagers, calendar birthdays, quest objectives, Museum wings, and map markers.
 - Reveals names when hovering darkened collection items in all four Museum wings, with individual item wiki links.
@@ -118,6 +119,25 @@ same item share a highlight, while the liked/loved lists still reflect the hover
 variant. Meeting a villager or giving a gift is reflected the next time you hover
 the item. No extra save data or configuration is needed.
 
+### Holding Interact at the Seed Maker
+
+Select a seed-compatible crop and face a Seed Maker. Tap **Interact** to process
+one item normally, or keep holding it to process more of the same selected stack.
+Repeating starts after half a second and processes one item every 0.2 seconds
+at the game's normal update rate. Keyboard and controller Interact bindings,
+including remapped controls, work without any additional hotkey or configuration.
+
+Release Interact, move or turn, change the selected slot or item, open a menu,
+or run out of items to cancel. Leaving the Seed Maker's interaction range,
+switching targets, a cutscene, or loading another area also cancels the hold.
+After cancellation, release and press Interact again to start a new batch.
+
+The game still handles each conversion, including item consumption, seed yields,
+sound, animation, and dropping the seeds. The companion does not pull from other
+inventory slots, bypass interaction restrictions, or repeat other machines,
+conversations, or item use. Existing single-press behavior is unchanged.
+The Seed Maker's separate **Inspect** action remains available and does not repeat.
+
 ### Talking and gifting while mounted
 
 Use the normal **Talk** or **Give item** control near a villager while riding.
@@ -201,6 +221,7 @@ On entering a newly generated mine floor, a compact `Mine bugs:` notification li
 - Gift selection has a search limit to avoid long delays. If the notification says that limit was reached, additional gifts may still fit in your backpack.
 - Other mods can register the same hotkeys or change native menus and game data. Remap conflicting keys and test your actual mod combination.
 - Mods that replace villager talk or gift eligibility can conflict with mounted interactions. Disable this feature if another mod needs to control those rules.
+- Mods that replace or add Seed Maker interactions can disable hold-to-repeat; normal single-press controls remain available.
 
 ## Troubleshooting
 
