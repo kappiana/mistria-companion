@@ -511,7 +511,8 @@ function MistriaCompanion_update_seed_makers() {
     // Only the game's chosen interactable can dispatch a repeat.
     for (var _index = 0; _index < INTERACTABLES.count(); _index++) {
         var _renderer = INTERACTABLES.get(_index);
-        if (!instance_exists(_renderer) || _renderer.object_index != obj_node_renderer) continue;
+        if (_renderer == undefined || !instance_exists(_renderer)
+            || _renderer.object_index != obj_node_renderer) continue;
         var _node = __MistriaCompanion_field(_renderer, "node");
         if (__MistriaCompanion_field(_node, "object_id") == ObjectId.SeedMaker) {
             __MistriaCompanion_install_seed_maker(_renderer);
@@ -2505,9 +2506,14 @@ function __MistriaCompanion_update_gift_highlights(_body, _details) {
     }
     var _state = _body.board_get("mistria_item_details_gift_highlights");
     if (_state != undefined && _state.signature == _signature) return;
-    if (_state != undefined) ANCHOR.free_node(_state.root);
+    if (_state != undefined) {
+        _state.root.disable();
+        ANCHOR.free_node(_state.root);
+    }
 
     var _root = ANCHOR.positional(_body);
+    // Late-added positional nodes otherwise keep the default screen origin and alpha.
+    _root.cache_is_dirty = true;
     _body.board_set("mistria_item_details_gift_highlights", { signature: _signature, root: _root });
     var _runs = __MistriaCompanion_gift_highlight_runs(_body.display_text, _details);
     for (var _index = 0; _index < array_length(_runs); _index++) {
@@ -2620,5 +2626,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.42");
+mmapi_mod_declare("mistria_item_details", "1.0.43");
 MistriaCompanion_register();

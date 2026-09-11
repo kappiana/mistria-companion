@@ -117,7 +117,8 @@ Highlights use the game's existing gift history, so past gifts count immediately
 That history tracks the base item, not its infusion; different infusions of the
 same item share a highlight, while the liked/loved lists still reflect the hovered
 variant. Meeting a villager or giving a gift is reflected the next time you hover
-the item. No extra save data or configuration is needed.
+the item. Highlights follow the tooltip's position and fade, including in shops.
+No extra save data or configuration is needed.
 
 ### Holding Interact at the Seed Maker
 
