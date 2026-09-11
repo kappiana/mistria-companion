@@ -7,7 +7,6 @@ function __MistriaCompanion_runtime() {
             mounted_interactions_enabled: true,
             frame: 0,
             clock_paused: false,
-            cache: {},
             recipe_cache: {},
             wiki_title: "",
             wiki_hint_title: "",
@@ -70,7 +69,6 @@ function MistriaCompanion_reset_save(_ctx) {
     if (_label != undefined && !_label.freed) ANCHOR.free_node(_label);
     _runtime.museum_label = undefined;
     _runtime.clock_paused = false;
-    _runtime.cache = {};
     _runtime.recipe_cache = {};
     _runtime.wiki_title = "";
     _runtime.wiki_hint_title = "";
@@ -1522,12 +1520,16 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
     _runtime.map_signature = _signature;
 }
 
-function __MistriaCompanion_npc_needs_gift(_npc_id) {
+function __MistriaCompanion_npc_is_known(_npc_id) {
     if (!is_array(NPCS) || _npc_id < 0 || _npc_id >= array_length(NPCS)) return false;
 
     var _npc = NPCS[_npc_id];
     if (_npc == undefined) return false;
-    return npc_is_unlocked(_npc_id) && _npc.has_met() && _npc.gift_flag;
+    return npc_is_unlocked(_npc_id) && _npc.has_met();
+}
+
+function __MistriaCompanion_npc_needs_gift(_npc_id) {
+    return __MistriaCompanion_npc_is_known(_npc_id) && NPCS[_npc_id].gift_flag;
 }
 
 function __MistriaCompanion_is_loved_gift(_item, _npc_id) {
@@ -2140,17 +2142,27 @@ function __MistriaCompanion_for_item(_item) {
 
     var _liked = [];
     var _loved = [];
+    var _liked_npcs = [];
+    var _loved_npcs = [];
     var _npc_data = __MistriaCompanion_as_array(global[$ "__npc_prototypes"]);
     if (array_length(_npc_data) > 0) {
         var _count = array_length(_npc_data);
         for (var _npc_id = 0; _npc_id < _count; _npc_id++) {
+            if (!__MistriaCompanion_npc_is_known(_npc_id)) continue;
             var _npc = _npc_data[_npc_id];
-            var _name = __MistriaCompanion_npc_name(_npc, "Unknown");
             var _desire = __MistriaCompanion_gift_desire_for_npc(_item, _npc, _npc_id);
+            if (_desire != Desire.Loved && _desire != Desire.Liked) continue;
+            var _name = __MistriaCompanion_npc_name(_npc, "Unknown");
+            var _entry = {
+                name: _name,
+                given: NPCS[_npc_id].gifts_given.contains(_item_id)
+            };
             if (_desire == Desire.Loved) {
                 array_push(_loved, _name);
+                array_push(_loved_npcs, _entry);
             } else if (_desire == Desire.Liked) {
                 array_push(_liked, _name);
+                array_push(_liked_npcs, _entry);
             }
         }
     }
@@ -2158,7 +2170,11 @@ function __MistriaCompanion_for_item(_item) {
     return {
         recipes: _recipe_summary,
         liked: __MistriaCompanion_join(_liked),
-        loved: __MistriaCompanion_join(_loved)
+        loved: __MistriaCompanion_join(_loved),
+        gift_sections: [
+            { label: "Liked by: ", npcs: _liked_npcs },
+            { label: "Loved by: ", npcs: _loved_npcs }
+        ]
     };
 }
 
@@ -2168,14 +2184,7 @@ function MistriaCompanion_description(_value, _ctx) {
     var _item_id = __MistriaCompanion_field(_item, "item_id");
     if (_item_id == undefined) return undefined;
 
-    var _cache_key = string(_item_id) + ":" + string(_item.infusion);
-    var _runtime = __MistriaCompanion_runtime();
-    var _details = __MistriaCompanion_field(_runtime.cache, _cache_key);
-    if (_details == undefined) {
-        _details = __MistriaCompanion_for_item(_item);
-        _runtime.cache[$ _cache_key] = _details;
-    }
-
+    var _details = __MistriaCompanion_for_item(_item);
     if (_details == undefined) return undefined;
     if (_details.recipes == "" && _details.liked == "" && _details.loved == "") return undefined;
 
@@ -2193,6 +2202,120 @@ function MistriaCompanion_description(_value, _ctx) {
         _result += "Loved by: " + _details.loved;
     }
     return _result;
+}
+
+function __MistriaCompanion_compact_gift_text(_text) {
+    _text = string_replace_all(_text, " ", "");
+    _text = string_replace_all(_text, "\n", "");
+    _text = string_replace_all(_text, "\r", "");
+    return string_replace_all(_text, "\t", "");
+}
+
+function __MistriaCompanion_gift_highlight_runs(_display_text, _details) {
+    var _suffix = "";
+    var _ranges = [];
+    for (var _section_index = 0; _section_index < array_length(_details.gift_sections); _section_index++) {
+        var _section = _details.gift_sections[_section_index];
+        if (array_length(_section.npcs) == 0) continue;
+        _suffix += __MistriaCompanion_compact_gift_text(_section.label);
+        for (var _index = 0; _index < array_length(_section.npcs); _index++) {
+            if (_index > 0) _suffix += ",";
+            var _entry = _section.npcs[_index];
+            var _name = __MistriaCompanion_compact_gift_text(_entry.name);
+            if (_entry.given && _name != "") {
+                array_push(_ranges, { start: string_length(_suffix), length: string_length(_name) });
+            }
+            _suffix += _name;
+        }
+    }
+    if (array_length(_ranges) == 0) return [];
+
+    // Reflow can replace spaces or split a localized name across lines.
+    // Match only our complete gift suffix, never names in the item description.
+    var _compact = __MistriaCompanion_compact_gift_text(_display_text);
+    var _offset = string_length(_compact) - string_length(_suffix);
+    if (_offset < 0 || string_copy(_compact, _offset + 1, string_length(_suffix)) != _suffix) return [];
+
+    var _lines = string_split(_display_text, "\n");
+    var _positions = [];
+    for (var _line_index = 0; _line_index < array_length(_lines); _line_index++) {
+        var _line = _lines[_line_index];
+        for (var _column = 1; _column <= string_length(_line); _column++) {
+            var _char = string_char_at(_line, _column);
+            if (_char == " " || _char == "\r" || _char == "\t") continue;
+            array_push(_positions, { line: _line_index, column: _column });
+        }
+    }
+    var _runs = [];
+    for (var _index = 0; _index < array_length(_ranges); _index++) {
+        var _range = _ranges[_index];
+        var _start = _positions[_offset + _range.start];
+        var _end = _positions[_offset + _range.start + _range.length - 1];
+        for (var _line_index = _start.line; _line_index <= _end.line; _line_index++) {
+            var _line = _lines[_line_index];
+            var _first = _line_index == _start.line ? _start.column : 1;
+            var _last = _line_index == _end.line ? _end.column : string_length(_line);
+            array_push(_runs, {
+                line: _line_index,
+                line_text: _line,
+                prefix: string_copy(_line, 1, _first - 1),
+                text: string_copy(_line, _first, _last - _first + 1)
+            });
+        }
+    }
+    return _runs;
+}
+
+function __MistriaCompanion_update_gift_highlights(_body, _details) {
+    _body.measure();
+    var _font = _body.get_font();
+    var _line_height = _body.get_line_height();
+    if (_line_height == undefined) _line_height = font_line_height(_font);
+    var _signature = _body.display_text + ":" + string(_font) + ":" + string(_line_height)
+        + ":" + string(_body.text_align) + ":" + string(_body.width) + ":" + string(_body.z);
+    for (var _section_index = 0; _section_index < array_length(_details.gift_sections); _section_index++) {
+        var _section = _details.gift_sections[_section_index];
+        _signature += ":" + _section.label;
+        for (var _index = 0; _index < array_length(_section.npcs); _index++) {
+            var _entry = _section.npcs[_index];
+            _signature += ":" + _entry.name + ":" + string(_entry.given);
+        }
+    }
+    var _state = _body.board_get("mistria_item_details_gift_highlights");
+    if (_state != undefined && _state.signature == _signature) return;
+    if (_state != undefined) ANCHOR.free_node(_state.root);
+
+    var _root = ANCHOR.positional(_body);
+    _body.board_set("mistria_item_details_gift_highlights", { signature: _signature, root: _root });
+    var _runs = __MistriaCompanion_gift_highlight_runs(_body.display_text, _details);
+    for (var _index = 0; _index < array_length(_runs); _index++) {
+        var _run = _runs[_index];
+        var _x = string_width_font(_run.prefix, _font);
+        if (_body.text_align == TextAlign.Center) {
+            _x += (_body.width - string_width_font(_run.line_text, _font)) / 2;
+        } else if (_body.text_align == TextAlign.Right) {
+            _x -= string_width_font(_run.line_text, _font);
+        }
+        ANCHOR.nine_slice(_root, _body.z + 0.5)
+            .set_sprite(spr_pixel_nine_slice)
+            .set_xy(_x - 1, _run.line * _line_height + 1)
+            .set_size(string_width_font(_run.text, _font) + 2, max(1, font_line_height(_font) - 2))
+            .set_color(make_color_rgb(77, 190, 206))
+            .set_alpha(0.45);
+    }
+}
+
+function MistriaCompanion_update_gift_tooltips() {
+    for (var _index = 0; _index < ANCHOR.open_menus.count(); _index++) {
+        var _menu = ANCHOR.open_menus.get(_index);
+        if (_menu.close_requested || _menu.free_requested || _menu.hide_requests > 0) continue;
+        if (__MistriaCompanion_field(_menu, "is_tooltip") != true) continue;
+        var _body = __MistriaCompanion_field(_menu, "body_text");
+        var _item = __MistriaCompanion_field(_menu, "item");
+        if (_body == undefined || _body.freed || _item == undefined) continue;
+        var _details = __MistriaCompanion_for_item(_item);
+        if (_details != undefined) __MistriaCompanion_update_gift_highlights(_body, _details);
+    }
 }
 
 function MistriaCompanion_floor_built(_ctx) {
@@ -2214,13 +2337,13 @@ function MistriaCompanion_tick() {
     var _language = local_language();
     if (_runtime.language != _language) {
         _runtime.language = _language;
-        _runtime.cache = {};
         _runtime.recipe_cache = {};
         _runtime.birthday_day = "";
         _runtime.map_signature = "";
         _runtime.map_labels_ready = false;
         _runtime.wiki_hint_title = "";
     }
+    MistriaCompanion_update_gift_tooltips();
     var _day = __MistriaCompanion_legendary_day_key();
     if (_runtime.legendary_day != _day) {
         _runtime.legendary_day = _day;
@@ -2273,5 +2396,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.40");
+mmapi_mod_declare("mistria_item_details", "1.0.41");
 MistriaCompanion_register();
