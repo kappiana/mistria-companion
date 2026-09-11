@@ -5,7 +5,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 ## Features
 
 - Shows compact cooking or crafting recipe summaries for a hovered item.
-- Lists villagers who like or love the actual hovered item, including its infusion and special-item gift rules.
+- Lists met villagers who like or love the actual hovered item, including its infusion and special-item gift rules, and highlights names when you have already given them that item.
 - Adds a chest button that grabs one loved gift for each met villager who has not received a gift that day, prioritizing birthdays and available backpack space.
 - Allows ordinary villager conversations, gifting, and Elsie's Gossip while riding your mount, using the normal controls.
 - Copies relevant Fields of Mistria Wiki links for items, villagers, calendar birthdays, quest objectives, Museum wings, and map markers.
@@ -104,6 +104,19 @@ villager order. A birthday gift can take priority even if fewer total gifts fit.
 The picker accounts for overlapping preferences, partial stacks, and item
 variants. It does not mark a villager as gifted until the gift is actually given.
 Repeated clicks can collect another set while those villagers remain ungifted.
+
+### Gift tooltip progress
+
+The **Liked by** and **Loved by** lists show only villagers you have met and
+unlocked. A soft teal highlight behind a name means you have given that villager
+the hovered item at least once in the current save, not just today. Preferences
+learned through Gossip alone do not count as gifts given.
+
+Highlights use the game's existing gift history, so past gifts count immediately.
+That history tracks the base item, not its infusion; different infusions of the
+same item share a highlight, while the liked/loved lists still reflect the hovered
+variant. Meeting a villager or giving a gift is reflected the next time you hover
+the item. No extra save data or configuration is needed.
 
 ### Talking and gifting while mounted
 

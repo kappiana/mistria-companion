@@ -238,6 +238,149 @@ test('tooltip and picker gift rules respect infusions, void exceptions, and bann
   assert.equal(desire(item(3, 0, [], false), npc, 0), undefined);
 });
 
+function giftTooltipHarness() {
+  const Desire = { Loved: 4, Liked: 3, Neutral: 2, Disliked: 1 };
+  const Infusion = { Loveable: 1, Likeable: 2 };
+  const runtime = { recipe_cache: {} };
+  const npc = (name, loved, met = true, unlocked = true) => ({
+    prototype: {
+      name, loved_gifts: list(loved ? [0] : []), liked_gifts: list(loved ? [] : [0]),
+      banned_gift_tags: list([]),
+    },
+    met, unlocked, has_met() { return this.met; },
+    gift_flag: true, gifts_given: new Set(), known_gift_preferences: new Set(),
+  });
+  const npcs = [
+    npc('Balor', false), npc('March', true), npc('Olric', true),
+    npc('Seridia', true, false), npc('Wheedle', true, true, false),
+  ];
+  let recipeReads = 0;
+  const item = { item_id: 0, infusion: 0, prototype: { giftable: true, tags: list([]) } };
+  for (const entry of npcs) {
+    entry.gifts_given.contains = entry.gifts_given.has.bind(entry.gifts_given);
+  }
+  const context = load([
+    'npc_is_known', 'npc_needs_gift', 'gift_desire_for_npc', 'join', 'for_item',
+    'compact_gift_text', 'gift_highlight_runs', 'update_gift_highlights',
+  ].map(privateName).concat([
+    publicName('description'), publicName('reset_save'), publicName('update_gift_tooltips'),
+  ]), {
+    Desire, Infusion, ItemId: { VoidNewt: 100, VoidCake: 101 }, NpcId: { Juniper: 10, Eiland: 11 },
+    NPCS: npcs,
+    global: { __item_data: [{ recipe_key: 'ore' }], __npc_prototypes: npcs.map(npc => npc.prototype) },
+    npc_is_unlocked: id => npcs[id].unlocked,
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_as_array: value => value,
+    __MistriaCompanion_npc_name: prototype => prototype.name,
+    __MistriaCompanion_recipe_uses_item: () => { recipeReads++; return false; },
+    __MistriaCompanion_recipe_summary: () => '',
+    string_length: value => Array.from(value).length,
+    string_char_at: (value, index) => Array.from(value)[index - 1],
+    string_copy: (value, start, count) => Array.from(value).slice(start - 1, start - 1 + count).join(''),
+    string_split: (value, separator) => value.split(separator),
+    string_replace_all: (value, search, replacement) => value.split(search).join(replacement),
+  });
+  const describe = (base = 'A rare artifact.') => context.MistriaCompanion_description(base, { item });
+  const details = () => context.__MistriaCompanion_for_item(item);
+  const runs = (text, value = details()) => Array.from(context.__MistriaCompanion_gift_highlight_runs(text, value));
+  return { context, runtime, npcs, item, Infusion, describe, details, runs, recipeReads: () => recipeReads };
+}
+
+test('gift tooltips omit unmet, locked, and missing NPCs without filtering daily recipients', () => {
+  const h = giftTooltipHarness();
+  h.npcs[1].gift_flag = false;
+  h.context.global.__npc_prototypes.push(h.npcs[0].prototype);
+  assert.equal(h.describe(), 'A rare artifact.\nLiked by: Balor\nLoved by: March, Olric');
+  const known = h.context.__MistriaCompanion_npc_is_known;
+  assert.equal(known(-1), false);
+  assert.equal(known(5), false);
+  h.context.NPCS = undefined;
+  assert.equal(h.describe(), undefined);
+  h.context.NPCS = [undefined];
+  assert.equal(known(0), false);
+});
+
+test('meeting and gifting update the same item immediately while recipes stay cached', () => {
+  const h = giftTooltipHarness();
+  h.npcs[2].known_gift_preferences.add(0);
+  assert.equal(h.details().gift_sections[1].npcs[1].given, false, 'Gossip is not a given gift');
+  h.npcs[2].gifts_given.add(0);
+  h.npcs[2].gift_flag = false;
+  assert.equal(h.details().gift_sections[1].npcs[1].given, true);
+  h.npcs[2].gift_flag = true;
+  assert.equal(h.details().gift_sections[1].npcs[1].given, true, 'history survives the next day');
+  h.npcs[3].met = true;
+  assert.match(h.describe(), /Loved by: March, Olric, Seridia$/);
+  h.npcs[4].unlocked = true;
+  assert.match(h.describe(), /Seridia, Wheedle$/);
+  assert.equal(h.recipeReads(), 1);
+
+  h.context.MistriaCompanion_reset_save({});
+  h.npcs[2].gifts_given.clear();
+  h.npcs[3].met = false;
+  assert.equal(h.details().gift_sections[1].npcs[1].given, false, 'no cross-save highlight cache');
+  assert.doesNotMatch(h.describe(), /Seridia/);
+  assert.equal(h.recipeReads(), 2);
+});
+
+test('gift history is per base item while hovered infusions still determine preference lists', () => {
+  const h = giftTooltipHarness();
+  h.npcs[0].gifts_given.add(0);
+  h.npcs[2].gifts_given.add(99);
+  assert.equal(h.details().gift_sections[0].npcs[0].given, true);
+  assert.equal(h.details().gift_sections[1].npcs[1].given, false);
+  h.item.infusion = h.Infusion.Loveable;
+  assert.equal(h.describe(''), 'Loved by: Balor, March, Olric');
+  assert.equal(h.details().gift_sections[1].npcs[0].given, true);
+  h.item.prototype.giftable = false;
+  assert.equal(h.describe(), undefined);
+});
+
+test('given names get exact highlight runs, not commas, headings, or matching description text', () => {
+  const h = giftTooltipHarness();
+  h.npcs[0].gifts_given.add(0);
+  h.npcs[2].gifts_given.add(0);
+  const runs = h.runs(h.describe('Olric and Balor.\nUses: Olric'));
+  assert.deepEqual(runs.map(run => ({ ...run })), [
+    { line: 2, line_text: 'Liked by: Balor', prefix: 'Liked by: ', text: 'Balor' },
+    { line: 3, line_text: 'Loved by: March, Olric', prefix: 'Loved by: March, ', text: 'Olric' },
+  ]);
+  assert.equal(h.runs('Olric is mentioned without the gift lists.').length, 0);
+  assert.equal(h.runs('Loved by: Olric').length, 0, 'do not decorate unrelated or stale text');
+  assert.equal(h.runs(h.describe() + '\nAnother mod replaced the suffix.').length, 0);
+});
+
+test('highlight ranges survive wrapping inside labels and localized multiword names', () => {
+  const h = giftTooltipHarness();
+  h.npcs[0].prototype.name = 'Céline';
+  h.npcs[2].prototype.name = '名 前';
+  h.npcs[0].gifts_given.add(0);
+  h.npcs[2].gifts_given.add(0);
+  const original = h.describe();
+  for (let width = 1; width <= 80; width++) {
+    const wrapped = original.split('\n').map(line =>
+      Array.from(line).reduce((text, char, index) =>
+        text + (index > 0 && index % width === 0 ? '\n' : '') + char, '')).join('\n');
+    const runs = h.runs(wrapped);
+    assert.equal(runs.map(run => run.text).join('').replace(/\s/g, ''), 'Céline名前', `width ${width}`);
+    for (const run of runs) {
+      assert.equal(wrapped.split('\n')[run.line], run.line_text);
+      assert.ok(run.line_text.startsWith(run.prefix + run.text));
+    }
+  }
+});
+
+test('the chest picker still requires a met, unlocked NPC with a daily gift available', () => {
+  const h = giftTooltipHarness();
+  const needsGift = h.context.__MistriaCompanion_npc_needs_gift;
+  assert.equal(needsGift(0), true);
+  h.npcs[0].gift_flag = false;
+  assert.equal(needsGift(0), false);
+  assert.equal(needsGift(3), false);
+  assert.equal(needsGift(4), false);
+  assert.equal(needsGift(999), false);
+});
+
 test('clock release preserves the incoming engine/filter result and save reset clears ownership', () => {
   const runtime = { clock_paused: true, bindings: { wiki: 'F7' }, all_bug_markers_enabled: true };
   const context = load([publicName('clock_advance'), publicName('reset_save')], {
@@ -992,6 +1135,91 @@ class Node {
   measure() {}
 }
 
+test('gift highlight nodes sit behind native text, reuse layout, and refresh without leaving old nodes', () => {
+  const h = giftTooltipHarness();
+  h.npcs[2].gifts_given.add(0);
+  let rootsCreated = 0;
+  const freed = [];
+  const markers = [];
+  class HighlightNode extends Node {
+    set_size(width, height) { Object.assign(this, { width, height }); return this; }
+    set_color(color) { this.color = color; return this; }
+  }
+  Object.assign(h.context, {
+    TextAlign: { Left: 0, Center: 1, Right: 2 },
+    spr_pixel_nine_slice: 'pixel',
+    make_color_rgb: (r, g, b) => [r, g, b],
+    font_line_height: () => 12,
+    string_width_font: text => text.length * 4,
+    ANCHOR: {
+      positional: parent => { rootsCreated++; return { parent }; },
+      nine_slice: (parent, z) => {
+        const node = Object.assign(new HighlightNode(), { parent, z });
+        markers.push(node);
+        return node;
+      },
+      free_node: root => { root.freed = true; freed.push(root); },
+    },
+  });
+  const body = Object.assign(new Node(), {
+    display_text: h.describe(''), width: 120, z: -10, text_align: 0,
+    get_font: () => 'standard',
+    get_line_height: () => undefined,
+  });
+  const update = () => h.context.__MistriaCompanion_update_gift_highlights(body, h.details());
+  update();
+  assert.equal(markers.length, 1);
+  const marker = markers[0];
+  assert.equal(marker.parent.parent, body, 'native tooltip owns and frees the overlays');
+  assert.deepEqual([marker.x, marker.y, marker.width, marker.height], [67, 13, 22, 10]);
+  assert.equal(marker.z, body.z + 0.5, 'background is behind text and above its parent panel');
+  assert.equal(marker.alpha, 0.45);
+  assert.deepEqual(marker.color, [77, 190, 206]);
+  update();
+  assert.equal(rootsCreated, 1, 'unchanged hover does not allocate nodes every frame');
+
+  h.npcs[2].gifts_given.clear();
+  update();
+  assert.equal(freed.length, 1);
+  assert.equal(markers.length, 1, 'clearing history removes the old marker without a replacement');
+  h.npcs[0].gifts_given.add(0);
+  update();
+  assert.equal(markers.length, 2);
+  assert.equal(markers[1].width, 22);
+  body.display_text = 'Liked by: Balor\nLoved by: March,\nOlric';
+  body.get_line_height = () => 16;
+  h.npcs[2].gifts_given.add(0);
+  update();
+  assert.equal(markers.at(-1).y, 33);
+  body.text_align = 1;
+  update();
+  assert.equal(markers.at(-1).x, 49, 'centered text uses each wrapped line width');
+  body.text_align = 2;
+  update();
+  assert.equal(markers.at(-1).x, -21, 'right-aligned text ends at the native text origin');
+});
+
+test('highlight updates visit visible item tooltips only and preserve native text', () => {
+  const h = giftTooltipHarness();
+  const body = Object.assign(new Node(), { text: h.describe(), display_text: h.describe() });
+  const tooltip = { is_tooltip: true, body_text: body, item: h.item };
+  const open = [
+    { ...tooltip, close_requested: true }, { ...tooltip, free_requested: true },
+    { ...tooltip, hide_requests: 1 }, { ...tooltip, is_tooltip: false },
+    { ...tooltip, item: undefined }, { ...tooltip, body_text: undefined },
+    { ...tooltip, body_text: { freed: true } }, tooltip,
+  ];
+  const updates = [];
+  h.context.ANCHOR = { open_menus: { count: () => open.length, get: index => open[index] } };
+  h.context.__MistriaCompanion_update_gift_highlights = (node, details) => updates.push({ node, details });
+  const before = body.text;
+  h.context.MistriaCompanion_update_gift_tooltips();
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].node, body);
+  assert.equal(updates[0].details.loved, 'March, Olric');
+  assert.equal(body.text, before);
+});
+
 function museumHarness(wing = 0) {
   class MuseumNode extends Node {
     constructor(parent, options = {}) {
@@ -1717,6 +1945,7 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_register_hotkeys: () => {},
     MistriaCompanion_update_settings_keybinds: () => {},
+    MistriaCompanion_update_gift_tooltips: () => { assert.equal(ready, true); },
     MistriaCompanion_update_mounted_interactions: () => {
       assert.equal(ready, true, 'mounted initialization must wait until the world is ready');
       mountedUpdates++;
