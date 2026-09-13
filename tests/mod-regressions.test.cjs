@@ -736,7 +736,7 @@ function giftTooltipHarness() {
   const context = load([
     'npc_is_known', 'npc_needs_gift', 'gift_desire_for_npc', 'join', 'for_item', 'details_text',
     'compact_gift_text', 'gift_highlight_runs', 'clear_gift_highlights', 'update_gift_highlights',
-    'universal_gift', 'cooking_base_text', 'cooking_gift_text',
+    'universal_gift_text', 'cooking_base_text', 'cooking_gift_text',
     'clear_cooking_details', 'update_cooking_details',
   ].map(privateName).concat([
     publicName('description'), publicName('reset_save'), publicName('update_gift_tooltips'),
@@ -745,7 +745,12 @@ function giftTooltipHarness() {
     Desire, Infusion, ItemId: { VoidNewt: 100, VoidCake: 101 }, NpcId: { Juniper: 10, Eiland: 11 },
     Menu: { Crafting: 'crafting' }, RecipeContext: { Cooking: 'cooking' },
     NPCS: npcs,
-    global: { __item_data: [{ recipe_key: 'ore' }], __npc_prototypes: npcs.map(npc => npc.prototype) },
+    global: {
+      __item_data: [{ recipe_key: 'ore' }],
+      __npc_prototypes: npcs.map(npc => npc.prototype).concat([{
+        name: 'Unmet villager', loved_gifts: list([]), liked_gifts: list([]), banned_gift_tags: list([]),
+      }]),
+    },
     npc_is_unlocked: id => npcs[id].unlocked,
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_as_array: value => value,
@@ -809,10 +814,71 @@ test('gift history is per base item while hovered infusions still determine pref
   assert.equal(h.details().gift_sections[0].npcs[0].given, true);
   assert.equal(h.details().gift_sections[1].npcs[1].given, false);
   h.item.infusion = h.Infusion.Loveable;
-  assert.equal(h.describe(''), 'Loved by: Balor, March, Olric');
-  assert.equal(h.details().gift_sections[1].npcs[0].given, true);
+  assert.equal(h.describe(''), 'Loved by: Everyone');
+  assert.equal(h.details().gift_sections.length, 0, 'universal infusions do not enumerate or highlight NPC names');
+  h.item.infusion = 0;
+  assert.equal(h.details().gift_sections[0].npcs[0].given, true, 'summary formatting never changes gift history');
   h.item.prototype.giftable = false;
   assert.equal(h.describe(), undefined);
+});
+
+test('universal item tooltips retain the description and show only the exact Everyone summary', () => {
+  const h = giftTooltipHarness();
+  h.runtime.recipe_cache['0'] = 'Another recipe';
+  h.npcs[0].gifts_given.add(0);
+  const description = 'A cream-filled donut shaped like a cow. This treat is loved by everyone.';
+  for (const [infusion, summary] of [
+    [h.Infusion.Loveable, 'Loved by: Everyone'],
+    [h.Infusion.Likeable, 'Liked by: Everyone'],
+  ]) {
+    h.item.infusion = infusion;
+    assert.equal(h.describe(description), `${description}\n${summary}`);
+    assert.equal(h.describe(''), summary);
+    const details = h.details();
+    assert.equal(details.universal, summary);
+    assert.equal(details.recipes, '');
+    assert.equal(details.liked, '');
+    assert.equal(details.loved, '');
+    assert.equal(details.gift_sections.length, 0);
+    assert.equal(h.runs(h.describe(description)).length, 0, 'Everyone is not an individual gift-history highlight');
+    assert.equal(h.context.__MistriaCompanion_cooking_gift_text(h.item, details), summary);
+  }
+  assert.equal(h.npcs[0].gifts_given.has(0), true, 'display summaries do not alter gift history');
+});
+
+test('universal summaries distinguish base-item love from mixed positive preferences across all NPCs', () => {
+  const h = giftTooltipHarness();
+  const prototypes = h.context.global.__npc_prototypes;
+  for (const prototype of prototypes) {
+    prototype.loved_gifts = list([0]);
+    prototype.liked_gifts = list([]);
+  }
+  assert.equal(h.describe('Original description.'), 'Original description.\nLoved by: Everyone');
+  prototypes[0].loved_gifts = list([]);
+  prototypes[0].liked_gifts = list([0]);
+  assert.equal(h.describe('Original description.'), 'Original description.\nLiked by: Everyone');
+  prototypes.at(-1).loved_gifts = list([]);
+  assert.equal(h.details().universal, '', 'a neutral unmet NPC prevents a false Everyone label');
+  assert.match(h.describe(), /Liked by: Balor\nLoved by: March, Olric$/);
+  h.runtime.recipe_cache['0'] = 'Soup';
+  assert.match(h.describe(), /Uses: Soup\nLiked by: Balor/, 'non-universal recipe summaries are unchanged');
+});
+
+test('universal item summaries need no met NPCs and preserve special-item and banned-gift exceptions', () => {
+  const h = giftTooltipHarness();
+  const universal = h.context.__MistriaCompanion_universal_gift_text;
+  h.item.infusion = h.Infusion.Loveable;
+  for (const npc of h.npcs) { npc.met = false; npc.unlocked = false; }
+  h.context.NPCS = undefined;
+  assert.equal(h.describe('A special dish.'), 'A special dish.\nLoved by: Everyone');
+  for (const id of [100, 101]) {
+    assert.equal(universal({ ...h.item, item_id: id }), '', 'void-item exceptions override universal infusions');
+  }
+  for (const prototype of h.context.global.__npc_prototypes) {
+    prototype.banned_gift_tags = list(['banned']);
+  }
+  h.item.prototype.tags = list(['banned']);
+  assert.equal(universal(h.item), '', 'no eligible recipients is not Everyone');
 });
 
 test('given names get exact highlight runs, not commas, headings, or matching description text', () => {
@@ -1064,7 +1130,7 @@ function mountedHarness() {
   function makeNpc(id = npcs.length + 1) {
     const npc = {
       npc_id: id, alive: true, talkAllowed: true, questsEmpty: true,
-      talkResult: false, giftResult: false,
+      talkResult: false, giftResult: false, questResult: false,
       me: { gift_flag: true, prototype: { banned_gift_tags: list(['banned']) } },
       fsm: {},
     };
@@ -1073,7 +1139,7 @@ function mountedHarness() {
     npc.entries = [
       entry(npc, 'talk', 'misc_local/talk', context.InputId.Interact),
       entry(npc, 'gift', 'misc_local/give_item', context.InputId.Throw),
-      entry(npc, 'quest', 'quest', context.InputId.Interact),
+      entry(npc, 'quest', 'misc_local/turn_in_quest_input', context.InputId.Interact),
       entry(npc, 'date', 'date', context.InputId.Interact),
       entry(npc, 'proposal', 'proposal', context.InputId.Throw),
     ];
@@ -1139,6 +1205,134 @@ test('mounted ordinary talk preserves can_talk and quest eligibility', () => {
   npc.questsEmpty = true;
   assert.equal(canTalk(), true);
   assert.equal(conditions.length, 0, 'native mount-vetoing predicates are not evaluated in mounted mode');
+});
+
+test('mounted quest hand-ins use live native quest eligibility without gift or daily-talk restrictions', () => {
+  const h = mountedHarness();
+  const npc = h.makeNpc();
+  const native = npc.entries[2];
+  native.can_interact_callback = h.context.method(npc, () =>
+    !npc.my_query_quests().is_empty() && !h.state.mounted);
+  assert.equal(native.can_interact_callback(), false, 'the native predicate blocks riding');
+  h.update();
+  assert.equal(native.can_interact_callback(), false, 'no completed quest is not eligible');
+  npc.questsEmpty = false;
+  assert.equal(native.can_interact_callback(), true);
+  npc.talkAllowed = false;
+  npc.me.gift_flag = false;
+  h.state.held = undefined;
+  assert.equal(native.can_interact_callback(), true, 'quest items need not be held and gifting status is irrelevant');
+  assert.equal(h.state.heldReads, 0);
+  assert.equal(h.actions.length, 0);
+  assert.equal(npc.entries[0].can_interact_callback(), false, 'a ready hand-in keeps priority over ordinary talk');
+  npc.questsEmpty = true;
+  assert.equal(native.can_interact_callback(), false, 'completing or invalidating the quest removes the action');
+  npc.talkAllowed = true;
+  assert.equal(npc.entries[0].can_interact_callback(), true);
+});
+
+test('mounted quests preserve native requirement and NPC target checks', () => {
+  const h = mountedHarness();
+  const npc = h.makeNpc();
+  const quest = { active: true, target: npc.npc_id, required: 3, items: 2 };
+  npc.my_query_quests = () => ({
+    is_empty: () => !quest.active || quest.target !== npc.npc_id || quest.items < quest.required,
+  });
+  h.update();
+  const canTurnIn = npc.entries[2].can_interact_callback;
+  assert.equal(canTurnIn(), false);
+  quest.items = 3;
+  assert.equal(canTurnIn(), true);
+  quest.target++;
+  assert.equal(canTurnIn(), false);
+  quest.target = npc.npc_id;
+  quest.active = false;
+  assert.equal(canTurnIn(), false);
+  assert.equal(quest.items, 3, 'eligibility never consumes quest items');
+});
+
+test('mounted quest selection and confirmation remain entirely in the unchanged native callback', () => {
+  const h = mountedHarness();
+  const npc = h.makeNpc();
+  // Native NPC order starts with Talk then Turn in quest; wrapping must not depend on indices.
+  [npc.entries[1], npc.entries[2]] = [npc.entries[2], npc.entries[1]];
+  let readyCount = 1;
+  const confirmation = { kind: 'native-confirmation' };
+  const selection = { kind: 'native-quest-selection' };
+  const calls = [];
+  npc.entries[1].callback = h.context.method(npc, () => {
+    assert.equal(h.context.self, npc);
+    calls.push(readyCount);
+    return readyCount > 1 ? selection : confirmation;
+  });
+  const action = npc.entries[1].callback;
+  npc.my_query_quests = () => ({ is_empty: () => readyCount === 0 });
+  h.update();
+  assert.equal(npc.entries[1].callback, action);
+  for (const count of [1, 2]) {
+    readyCount = count;
+    const chosen = npc.entries.find(entry =>
+      entry.input_id === h.context.InputId.Interact && entry.can_interact_callback());
+    assert.equal(chosen, npc.entries[1], 'hand-in, not ordinary talk, receives Interact');
+    assert.equal(chosen.callback(), count > 1 ? selection : confirmation);
+  }
+  assert.deepEqual(calls, [1, 2]);
+  assert.equal(h.state.held.amount, 2, 'opening either native popup does not consume an item');
+  assert.equal(npc.me.gift_flag, true);
+  assert.equal(h.state.playerState, 'MountDefault');
+  assert.equal(h.player.fsm.next_state, undefined, 'the companion does not force a dismount or state change');
+});
+
+test('quest wrappers delegate exact results when off-mount, disabled, or missing the player', () => {
+  for (const mode of ['off-mount', 'disabled', 'missing-player']) {
+    const h = mountedHarness();
+    const npc = h.makeNpc();
+    const original = npc.entries[2].can_interact_callback;
+    h.update();
+    if (mode === 'off-mount') h.state.mounted = false;
+    if (mode === 'disabled') h.runtime.mounted_interactions_enabled = false;
+    if (mode === 'missing-player') h.player.alive = false;
+    npc.my_query_quests = () => assert.fail('delegated mode must use the original condition');
+    for (const result of [undefined, false, true, 0, 7, 'native result', { native: true }]) {
+      npc.questResult = result;
+      assert.equal(npc.entries[2].can_interact_callback(), result);
+      assert.equal(npc.entries[2].__mistria_companion_mounted.original, original);
+    }
+  }
+});
+
+test('mounted quest hand-ins respect Caldarus sleep and destroyed NPCs', () => {
+  const h = mountedHarness();
+  const caldarus = h.makeNpc(h.context.NpcId.Caldarus);
+  const npc = h.makeNpc();
+  caldarus.questsEmpty = false;
+  npc.questsEmpty = false;
+  h.update();
+  assert.equal(caldarus.entries[2].can_interact_callback(), true);
+  h.state.sleeping = true;
+  assert.equal(caldarus.entries[2].can_interact_callback(), false);
+  assert.equal(npc.entries[2].can_interact_callback(), true);
+  npc.alive = false;
+  npc.my_query_quests = () => assert.fail('do not query a destroyed NPC');
+  assert.equal(npc.entries[2].can_interact_callback(), false);
+});
+
+test('late quest registration is wrapped once without replacing subsequent foreign changes', () => {
+  const h = mountedHarness();
+  const npc = h.makeNpc();
+  const quest = npc.entries.splice(2, 1)[0];
+  h.update();
+  assert.ok(h.warnings.length > 0);
+  npc.entries.push(quest);
+  h.update();
+  const wrapper = quest.can_interact_callback;
+  h.update();
+  assert.equal(quest.can_interact_callback, wrapper);
+  const foreign = () => false;
+  quest.can_interact_callback = foreign;
+  npc.entries.push(h.entry(npc, 'unrelated', 'unrelated', h.context.InputId.Throw));
+  h.update();
+  assert.equal(quest.can_interact_callback, foreign);
 });
 
 test('mounted Elsie Gossip keeps its quest unlock and native action, including cooldown responses', () => {
@@ -1242,7 +1436,7 @@ test('mounted Caldarus native talk/gift/sleepTalk layout wraps only ordinary ent
     assert.equal(interaction.callback, before[index].callback);
     assert.equal(interaction.local_key, before[index].local_key);
     assert.equal(interaction.input_id, before[index].input_id);
-    if (index < 2) {
+    if (index < 3) {
       assert.notEqual(interaction.can_interact_callback, before[index].can_interact_callback);
     } else {
       assert.deepEqual(interaction, before[index], 'all extra callbacks, including sleepTalk, remain identical');
@@ -1302,7 +1496,7 @@ test('mounted gift eligibility preserves daily flag, held item, giftability, ban
   assert.equal(held.amount, 2, 'eligibility never consumes an item');
 });
 
-test('mounted talk, gift, and Elsie Gossip are blocked by jump, pending FSM change, pause, MIST, textbox, fire breath, or no mount', () => {
+test('mounted talk, gift, quest hand-ins, and Gossip are blocked by unsafe player states', () => {
   const cases = [
     ['MountJump', h => { h.state.playerState = h.context.PlayerState.MountJump; }],
     ['other player state', h => { h.state.playerState = h.context.PlayerState.Default; }],
@@ -1325,6 +1519,8 @@ test('mounted talk, gift, and Elsie Gossip are blocked by jump, pending FSM chan
     assert.equal(harness.context.__MistriaCompanion_mounted_ready(), false, label);
     assert.equal(npc.entries[0].can_interact_callback(), false, `${label}: talk`);
     assert.equal(npc.entries[1].can_interact_callback(), false, `${label}: gift`);
+    npc.questsEmpty = false;
+    assert.equal(npc.entries[2].can_interact_callback(), false, `${label}: quest`);
     assert.equal(gossip.can_interact_callback(), false, `${label}: gossip`);
     assert.equal(harness.state.gossipQuestReads, 0);
     assert.equal(harness.conditions.length, 0);
@@ -1332,7 +1528,7 @@ test('mounted talk, gift, and Elsie Gossip are blocked by jump, pending FSM chan
   }
 });
 
-test('mounted installation preserves native action identity, ordering, input keys, and unrelated quest/date/proposal callbacks', () => {
+test('mounted installation preserves action identity and ordering, changing only talk/gift/quest eligibility', () => {
   const { context, state, makeNpc, actions, conditions, update } = mountedHarness();
   const npc = makeNpc();
   const entries = [...npc.entries];
@@ -1351,7 +1547,7 @@ test('mounted installation preserves native action identity, ordering, input key
     assert.equal(entry.callback, before[index].callback);
     assert.equal(entry.local_key, before[index].local_key);
     assert.equal(entry.input_id, before[index].input_id);
-    if (index < 2) {
+    if (index < 3) {
       assert.notEqual(entry.can_interact_callback, before[index].can_interact_callback);
     } else {
       assert.deepEqual(entry, before[index], 'unrelated actions and predicates remain untouched');
@@ -1459,6 +1655,9 @@ test('mounted installer warns and preserves missing, duplicate, or wrong-input n
     ['duplicate gift', (npc) => { npc.entries.push({ ...npc.entries[1] }); }],
     ['wrong talk input', (npc, h) => { npc.entries[0].input_id = h.context.InputId.Throw; }],
     ['wrong gift input', (npc, h) => { npc.entries[1].input_id = h.context.InputId.Interact; }],
+    ['missing quest', (npc) => { npc.entries.splice(2, 1); }],
+    ['duplicate quest', (npc) => { npc.entries.push({ ...npc.entries[2] }); }],
+    ['wrong quest input', (npc, h) => { npc.entries[2].input_id = h.context.InputId.Throw; }],
     ['noncanonical Caldarus pair', (npc, h) => {
       npc.npc_id = h.context.NpcId.Caldarus;
       npc.entries.splice(2, 0, { ...npc.entries[0] });
@@ -1478,9 +1677,10 @@ test('mounted installer warns and preserves missing, duplicate, or wrong-input n
     for (const [index, entry] of npc.entries.entries()) {
       const isTalk = entry.local_key === 'misc_local/talk' && entry.input_id === harness.context.InputId.Interact;
       const isGift = entry.local_key === 'misc_local/give_item' && entry.input_id === harness.context.InputId.Throw;
+      const isQuest = entry.local_key === 'misc_local/turn_in_quest_input' && entry.input_id === harness.context.InputId.Interact;
       const matching = npc.entries.filter(other =>
         other.local_key === entry.local_key && other.input_id === entry.input_id).length;
-      if ((!isTalk && !isGift) || matching !== 1) {
+      if ((!isTalk && !isGift && !isQuest) || matching !== 1) {
         assert.deepEqual(entry, before[index], `${label}: ambiguous or unrelated entry is unchanged`);
       } else {
         assert.notEqual(entry.can_interact_callback, before[index].can_interact_callback,
@@ -1505,7 +1705,7 @@ test('mounted installer warns and leaves malformed list and callback shapes unch
   }
   for (const key of ['can_interact_callback', 'callback']) {
     for (const value of [undefined, null, 0, 'method', {}]) {
-      for (const index of [0, 1]) {
+      for (const index of [0, 1, 2]) {
         const { makeNpc, update, warnings } = mountedHarness();
         const npc = makeNpc();
         npc.entries[index][key] = value;
@@ -1514,7 +1714,9 @@ test('mounted installer warns and leaves malformed list and callback shapes unch
         assert.deepEqual(npc.entries[index], before);
         assert.equal(npc.entries[index].__mistria_companion_mounted, undefined);
         assert.ok(warnings.some(args => args[0].endsWith(':mounted_callback')));
-        assert.ok(npc.entries[1 - index].__mistria_companion_mounted, 'valid counterpart is not discarded');
+        for (const other of [0, 1, 2].filter(value => value !== index)) {
+          assert.ok(npc.entries[other].__mistria_companion_mounted, 'valid counterparts are not discarded');
+        }
       }
     }
   }
@@ -1781,14 +1983,34 @@ test('highlight updates visit visible item tooltips only and preserve native tex
   assert.equal(body.text, before);
 });
 
+test('switching between normal and universal gifts removes obsolete NPC-name highlights', () => {
+  const h = giftTooltipHarness();
+  const renderer = highlightRendererHarness(h);
+  h.npcs[2].gifts_given.add(0);
+  const body = renderer.makeBody(h.describe());
+  const update = () => h.context.__MistriaCompanion_update_gift_highlights(body, h.details());
+  update();
+  const old = body.board_get('mistria_item_details_gift_highlights').root;
+  assert.equal(old.children.length, 1);
+  h.item.infusion = h.Infusion.Loveable;
+  body.text = h.describe();
+  body.display_text = body.text;
+  update();
+  assert.equal(old.enabled, false);
+  assert.equal(old.freed, true);
+  assert.equal(body.board_get('mistria_item_details_gift_highlights').root.children.length, 0);
+  h.item.infusion = 0;
+  body.text = h.describe();
+  body.display_text = body.text;
+  update();
+  assert.equal(body.board_get('mistria_item_details_gift_highlights').root.children.length, 1);
+});
+
 function cookingHighlightHarness() {
   const h = giftTooltipHarness();
   const renderer = highlightRendererHarness(h);
   h.context.font_line_height = () => 13;
   h.context.global.__item_data.push({ recipe_key: 'second_dish' });
-  h.context.global.__npc_prototypes.push({
-    name: 'Unmet villager', loved_gifts: list([]), liked_gifts: list([]), banned_gift_tags: list([]),
-  });
   h.npcs[0].prototype.loved_gifts = list([1]);
   const anotherDish = { ...h.item, item_id: 1 };
   const description = renderer.makeBody('');
@@ -2019,7 +2241,7 @@ test('cooking gift highlights stay item-specific and refresh after history, infu
   h.description.display_text = 'Localized dish description.\nLoved by: Balor, March, 名\n前';
   h.update();
   h.show();
-  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'This dish is liked or loved by everyone.');
+  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'Loved by: Everyone');
   h.menu.mistria_gift_popup.close();
   assert.doesNotMatch(h.description.text, /Seridia|Wheedle/);
   const gifts = h.npcs.map(npc => Array.from(npc.gifts_given));
@@ -2066,29 +2288,29 @@ test('native cooking gift popup preserves full dish descriptions and all long gi
 
 test('universal gift suppression checks all eligible NPCs, not only met NPCs, and preserves dish description', () => {
   const h = cookingHighlightHarness();
-  const universal = h.context.__MistriaCompanion_universal_gift;
-  assert.equal(universal(h.item), false, 'all met villagers like this but an unmet villager does not');
+  const universal = h.context.__MistriaCompanion_universal_gift_text;
+  assert.equal(universal(h.item), '', 'all met villagers like this but an unmet villager does not');
   h.update();
   assert.match(h.context.__MistriaCompanion_cooking_gift_text(h.item, h.details()), /Liked by:|Loved by:/);
   const baseline = h.context.global.__npc_prototypes;
   h.context.global.__npc_prototypes = baseline.slice(0, -1);
-  assert.equal(universal(h.item), true, 'mixed liked/loved counts when everybody eligible has a positive preference');
+  assert.equal(universal(h.item), 'Liked by: Everyone', 'mixed liked/loved counts when everybody eligible has a positive preference');
   h.select(h.item, 'Everybody likes this dish.');
   h.update();
   assert.equal(h.description.text, 'Everybody likes this dish.');
   h.show();
-  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'This dish is liked or loved by everyone.');
+  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'Liked by: Everyone');
   h.context.global.__npc_prototypes = baseline;
   for (const infusion of [h.Infusion.Likeable, h.Infusion.Loveable]) {
     h.item.infusion = infusion;
-    assert.equal(universal(h.item), true);
+    assert.equal(universal(h.item), infusion === h.Infusion.Loveable ? 'Loved by: Everyone' : 'Liked by: Everyone');
   }
   h.item.item_id = 100; // Void Newt exceptions still take precedence over universal infusions.
-  assert.equal(universal(h.item), false);
+  assert.equal(universal(h.item), '');
   h.item.prototype.giftable = false;
-  assert.equal(universal(h.item), false, 'no eligible recipients is not everyone');
+  assert.equal(universal(h.item), '', 'no eligible recipients is not everyone');
   h.context.global.__npc_prototypes = [];
-  assert.equal(universal(h.item), false);
+  assert.equal(universal(h.item), '');
 });
 
 test('cooking strips only the exact companion suffix, never words from the original description', () => {
