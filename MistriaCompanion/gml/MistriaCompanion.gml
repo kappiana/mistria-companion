@@ -12,8 +12,9 @@ function __MistriaCompanion_runtime() {
             wiki_title: "",
             wiki_hint_title: "",
             wiki_hints_enabled: true,
+            notifications_enabled: false,
             museum_label: undefined,
-            all_bug_markers_enabled: false,
+            all_bug_markers_enabled: true,
             legendary_day: "",
             legendary_sightings: [],
             seen_spawns: {},
@@ -32,9 +33,9 @@ function __MistriaCompanion_runtime() {
             map_labels_ready: false,
             mine_bug_floor: "",
             mine_bug_delay: -1,
-            dig_spot_notifications_enabled: true,
             dig_spot_visit_key: "",
             dig_spot_delay: -1,
+            dig_spot_notice: undefined,
             dig_spots: []
         };
     }
@@ -87,6 +88,7 @@ function MistriaCompanion_reset_save(_ctx) {
     _runtime.mine_bug_delay = -1;
     _runtime.dig_spot_visit_key = "";
     _runtime.dig_spot_delay = -1;
+    _runtime.dig_spot_notice = undefined;
     _runtime.dig_spots = [];
     _runtime.map_menu = undefined;
     _runtime.map_node = undefined;
@@ -109,7 +111,7 @@ function __MistriaCompanion_hotkey_actions() {
         { key: "wiki", title: "Copy current wiki link", default_key: "F7", callback: MistriaCompanion_open_wiki },
         { key: "wiki_hints", title: "Show / hide wiki hints", default_key: "F8", callback: MistriaCompanion_toggle_wiki_hints },
         { key: "bugs", title: "Show / hide ordinary bugs", default_key: "F9", callback: MistriaCompanion_toggle_all_bug_markers },
-        { key: "dig_notifications", title: "Show / hide dig notices", default_key: "F10", callback: MistriaCompanion_toggle_dig_spot_notifications }
+        { key: "notifications", title: "Toggle automatic alerts", default_key: "F10", callback: MistriaCompanion_toggle_notifications }
     ];
 }
 
@@ -119,11 +121,19 @@ function __MistriaCompanion_register_hotkeys() {
 
     var _config = mmapi_config_read_valid("mistria_item_details", 1);
     _runtime.mounted_interactions_enabled = __MistriaCompanion_mounted_setting(_config);
+    _runtime.notifications_enabled = __MistriaCompanion_preference(_config, "notifications_enabled", false);
+    _runtime.all_bug_markers_enabled = __MistriaCompanion_preference(_config, "all_bug_markers_enabled", true);
+    _runtime.wiki_hints_enabled = __MistriaCompanion_preference(_config, "wiki_hints_enabled", true);
     var _actions = __MistriaCompanion_hotkey_actions();
     _runtime.bindings = {};
     _runtime.keybind_rows = [];
     var _registered = {};
-    var _saved = { mounted_interactions_enabled: _runtime.mounted_interactions_enabled };
+    var _saved = {
+        mounted_interactions_enabled: _runtime.mounted_interactions_enabled,
+        notifications_enabled: _runtime.notifications_enabled == true,
+        all_bug_markers_enabled: _runtime.all_bug_markers_enabled == true,
+        wiki_hints_enabled: _runtime.wiki_hints_enabled == true
+    };
     for (var _index = 0; _index < array_length(_actions); _index++) {
         var _action = _actions[_index];
         var _row = { title: _action.title, bindings: [] };
@@ -131,6 +141,9 @@ function __MistriaCompanion_register_hotkeys() {
             var _key = _action.key + (_alternate == 0 ? "" : "_alternate");
             var _default = _alternate == 0 ? _action.default_key : "";
             var _name = __MistriaCompanion_field(_config, _key);
+            if (_name == undefined && _action.key == "notifications") {
+                _name = __MistriaCompanion_field(_config, "dig_notifications" + (_alternate == 0 ? "" : "_alternate"));
+            }
             if (_name == undefined) _name = _default;
             var _binding = is_string(_name) ? mmapi_hotkey_binding_from_name(_name) : undefined;
             if (_name != "" && _binding == undefined) {
@@ -163,12 +176,43 @@ function __MistriaCompanion_register_hotkeys() {
 }
 
 function __MistriaCompanion_mounted_setting(_config) {
-    if (__MistriaCompanion_field(_config, "mounted_interactions_enabled") != undefined) {
+    return __MistriaCompanion_preference(_config, "mounted_interactions_enabled", true);
+}
+
+function __MistriaCompanion_preference(_config, _key, _default) {
+    if (__MistriaCompanion_field(_config, _key) != undefined) {
         // Read the member inline: the engine can coerce bool locals to numbers.
-        if (typeof(_config.mounted_interactions_enabled) == "bool") {
-            return _config.mounted_interactions_enabled;
+        if (typeof(_config[$ _key]) == "bool") {
+            return _config[$ _key];
         }
-        mmapi_log_warn("mistria_item_details", "Invalid mounted_interactions_enabled; using true.");
+        mmapi_log_warn("mistria_item_details", "Invalid " + _key + "; using " + (_default ? "true" : "false") + ".");
+    }
+    return _default ? true : false;
+}
+
+function __MistriaCompanion_save_preferences() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _config = mmapi_config_read_valid("mistria_item_details", 1);
+    if (!is_struct(_config)) {
+        mmapi_log_warn("mistria_item_details", "Could not read configuration to save display preferences.");
+        return false;
+    }
+    _config.notifications_enabled = _runtime.notifications_enabled == true;
+    _config.all_bug_markers_enabled = _runtime.all_bug_markers_enabled == true;
+    _config.wiki_hints_enabled = _runtime.wiki_hints_enabled == true;
+    mmapi_config_write("mistria_item_details", 1, _config);
+    // MMAPI logs write failures but does not return a status.
+    var _saved = mmapi_config_read_valid("mistria_item_details", 1);
+    if (!is_struct(_saved)
+        || typeof(_saved[$ "notifications_enabled"]) != "bool"
+        || typeof(_saved[$ "all_bug_markers_enabled"]) != "bool"
+        || typeof(_saved[$ "wiki_hints_enabled"]) != "bool"
+        || _saved.notifications_enabled != _runtime.notifications_enabled
+        || _saved.all_bug_markers_enabled != _runtime.all_bug_markers_enabled
+        || _saved.wiki_hints_enabled != _runtime.wiki_hints_enabled)
+    {
+        mmapi_log_warn("mistria_item_details", "Display preferences could not be saved; changes apply only to this session.");
+        return false;
     }
     return true;
 }
@@ -801,11 +845,65 @@ function __MistriaCompanion_dig_spot_location_name() {
     return _name;
 }
 
+function __MistriaCompanion_dig_notice_blocked() {
+    if (MIST != undefined && MIST.running) return true;
+    if (has_flag(PAUSE_STATUS, PauseStatus.CUTSCENE)) return true;
+    var _textbox = __MistriaCompanion_menu(Menu.Textbox);
+    return _textbox != undefined && _textbox.hide_requests == 0;
+}
+
+function MistriaCompanion_dig_notice_think(_node) {
+    if (!_node.freed && __MistriaCompanion_dig_notice_blocked()) _node.set_alpha(0);
+}
+
+function MistriaCompanion_show_dig_spot_notice() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _notice = _runtime.dig_spot_notice;
+    if (_notice == undefined) return;
+    if (!_runtime.notifications_enabled || GRID == undefined
+        || GRID != _notice.grid || __MistriaCompanion_dig_spot_visit_key() != _notice.visit_key)
+    {
+        _runtime.dig_spot_notice = undefined;
+        return;
+    }
+    if (__MistriaCompanion_dig_notice_blocked() || __MistriaCompanion_field(GRID, "is_setup") != true) {
+        _notice.wait_frames = 12;
+        return;
+    }
+    // A short clear interval avoids notices between scene setup and dialogue.
+    if (_notice.wait_frames > 0) {
+        _notice.wait_frames--;
+        return;
+    }
+    var _count = 0;
+    for (var _index = 0; _index < array_length(_runtime.dig_spots); _index++) {
+        if (__MistriaCompanion_dig_spot_active(_runtime.dig_spots[_index])) _count++;
+    }
+    if (_count == 0) {
+        _runtime.dig_spot_notice = undefined;
+        return;
+    }
+    var _menu = __MistriaCompanion_menu(Menu.InfoToasts);
+    if (_menu == undefined) {
+        mmapi_warn_rate_limited("mistria_item_details:dig_notice_menu", "mistria_item_details",
+            "Waiting for the notification menu to show the dig-spot count.");
+        return;
+    }
+    var _shown = _menu.create_notification(ANCHOR.wrap_for_local(
+        "Dig spots: " + string(_count) + " - " + __MistriaCompanion_dig_spot_location_name()), 60 * 3);
+    if (_shown) {
+        var _node = _menu.toasts.last();
+        _node.set_think_callback(MistriaCompanion_dig_notice_think, [_node]);
+    }
+    _runtime.dig_spot_notice = undefined;
+}
+
 function MistriaCompanion_detect_dig_spots() {
     var _runtime = __MistriaCompanion_runtime();
     if (GRID == undefined) {
         _runtime.dig_spot_visit_key = "";
         _runtime.dig_spot_delay = -1;
+        _runtime.dig_spot_notice = undefined;
         _runtime.dig_spots = [];
         return;
     }
@@ -814,6 +912,7 @@ function MistriaCompanion_detect_dig_spots() {
     if (_runtime.dig_spot_visit_key != _visit_key) {
         _runtime.dig_spot_visit_key = _visit_key;
         _runtime.dig_spot_delay = 0;
+        _runtime.dig_spot_notice = undefined;
         _runtime.dig_spots = [];
         return;
     }
@@ -833,15 +932,9 @@ function MistriaCompanion_detect_dig_spots() {
     _runtime.dig_spots = _spots;
     _runtime.dig_spot_delay = -1;
     var _count = array_length(_runtime.dig_spots);
-    if (_count == 0 || !_runtime.dig_spot_notifications_enabled) return;
+    if (_count == 0 || !_runtime.notifications_enabled) return;
 
-    create_notification(
-        ANCHOR.wrap_for_local(
-            "Dig spots: " + string(_count) + " - "
-                + __MistriaCompanion_dig_spot_location_name()
-        ),
-        60 * 3
-    );
+    _runtime.dig_spot_notice = { grid: GRID, visit_key: _visit_key, wait_frames: 12 };
 }
 
 function __MistriaCompanion_legendary_day_key() {
@@ -869,7 +962,7 @@ function __MistriaCompanion_track_legendary(_kind, _item_id) {
     if (__MistriaCompanion_has_name(_runtime.legendary_sightings, _entry)) return;
 
     array_push(_runtime.legendary_sightings, _entry);
-    __MistriaCompanion_notify(_entry, 60 * 4);
+    if (_runtime.notifications_enabled) __MistriaCompanion_notify(_entry, 60 * 4);
 }
 
 function __MistriaCompanion_track_legendary_fish(_fish) {
@@ -932,6 +1025,7 @@ function MistriaCompanion_show_mine_bug_spawns() {
     var _item_data = global[$ "__item_data"];
     if (BUGS == undefined || !is_array(_item_data)) return;
     _runtime.mine_bug_delay = -1;
+    if (!_runtime.notifications_enabled) return;
 
     var _names = [];
     var _counts = [];
@@ -1013,27 +1107,32 @@ function MistriaCompanion_toggle_wiki_hints() {
     var _runtime = __MistriaCompanion_runtime();
     _runtime.wiki_hints_enabled = !_runtime.wiki_hints_enabled;
     _runtime.wiki_hint_title = "";
+    var _saved = __MistriaCompanion_save_preferences();
     __MistriaCompanion_notify(
-        _runtime.wiki_hints_enabled ? "Wiki hints enabled." : "Wiki hints disabled.", 60);
+        (_runtime.wiki_hints_enabled ? "Wiki hints enabled." : "Wiki hints disabled.")
+            + (_saved ? "" : " Preference not saved."), 60);
 }
 
 function MistriaCompanion_toggle_all_bug_markers() {
     var _runtime = __MistriaCompanion_runtime();
     _runtime.all_bug_markers_enabled = !_runtime.all_bug_markers_enabled;
     _runtime.scan_frame = -12;
+    var _saved = __MistriaCompanion_save_preferences();
     __MistriaCompanion_notify(
-        _runtime.all_bug_markers_enabled
+        (_runtime.all_bug_markers_enabled
             ? "Ordinary bug map markers enabled."
-            : "Ordinary bug map markers disabled.", 60 * 2);
+            : "Ordinary bug map markers disabled.")
+            + (_saved ? "" : " Preference not saved."), 60 * 2);
 }
 
-function MistriaCompanion_toggle_dig_spot_notifications() {
+function MistriaCompanion_toggle_notifications() {
     var _runtime = __MistriaCompanion_runtime();
-    _runtime.dig_spot_notifications_enabled = !_runtime.dig_spot_notifications_enabled;
+    _runtime.notifications_enabled = !_runtime.notifications_enabled;
+    if (!_runtime.notifications_enabled) _runtime.dig_spot_notice = undefined;
+    var _saved = __MistriaCompanion_save_preferences();
     __MistriaCompanion_notify(
-        _runtime.dig_spot_notifications_enabled
-            ? "Dig spot notifications enabled."
-            : "Dig spot notifications disabled.", 60 * 2);
+        (_runtime.notifications_enabled ? "Automatic alerts enabled." : "Automatic alerts disabled.")
+            + (_saved ? "" : " Preference not saved."), 60 * 2);
 }
 
 function __MistriaCompanion_show_wiki_hint() {
@@ -2771,6 +2870,7 @@ function MistriaCompanion_tick() {
         _runtime.seen_spawns = {};
         _runtime.dig_spot_visit_key = "";
         _runtime.dig_spot_delay = 0;
+        _runtime.dig_spot_notice = undefined;
         _runtime.dig_spots = [];
         _runtime.mine_bug_floor = "";
         _runtime.mine_bug_delay = 0;
@@ -2778,6 +2878,7 @@ function MistriaCompanion_tick() {
         _runtime.scan_frame = -12;
     }
     if (_runtime.dig_spot_delay >= 0) MistriaCompanion_detect_dig_spots();
+    MistriaCompanion_show_dig_spot_notice();
     if (_runtime.mine_bug_delay >= 0) MistriaCompanion_show_mine_bug_spawns();
     MistriaCompanion_track_legendary_spawns();
     MistriaCompanion_update_birthday_label();
@@ -2809,5 +2910,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.45");
+mmapi_mod_declare("mistria_item_details", "1.0.46");
 MistriaCompanion_register();

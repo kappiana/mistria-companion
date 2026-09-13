@@ -945,7 +945,7 @@ test('clock release preserves the incoming engine/filter result and save reset c
 
 const hotkeyCallbacks = [
   'toggle_clock', 'show_legendary_sightings', 'open_wiki',
-  'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_dig_spot_notifications',
+  'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications',
 ];
 
 function mountedConfigHarness(config) {
@@ -954,14 +954,17 @@ function mountedConfigHarness(config) {
   const registrations = [];
   const warnings = [];
   const context = load([
-    privateName('runtime'), privateName('mounted_setting'),
+    privateName('runtime'), privateName('preference'), privateName('mounted_setting'),
+    privateName('save_preferences'),
     privateName('hotkey_actions'), privateName('register_hotkeys'), publicName('reset_save'),
+    publicName('toggle_wiki_hints'), publicName('toggle_all_bug_markers'), publicName('toggle_notifications'),
   ], {
     global: {},
     ...Object.fromEntries(hotkeyCallbacks.map(name => [publicName(name), () => name])),
     mmapi_config_read_valid: (...args) => { reads.push(args); return config; },
     mmapi_config_write: (...args) => writes.push(args),
     mmapi_log_warn: (...args) => warnings.push(args),
+    __MistriaCompanion_notify: () => {},
     mmapi_hotkey_binding_from_name: name => name === '' ? undefined : { name },
     mmapi_hotkey_register_binding: (binding, callback) => registrations.push({ binding, callback }),
   });
@@ -1028,14 +1031,16 @@ test('mounted config preserves custom primary and alternate keybindings while wr
     wiki: 'F11', wiki_alternate: 'SHIFT+F11',
     wiki_hints: 'F12', wiki_hints_alternate: '',
     bugs: 'INSERT', bugs_alternate: 'SHIFT+INSERT',
-    dig_notifications: 'DELETE', dig_notifications_alternate: '',
+    notifications: 'DELETE', notifications_alternate: '',
   };
   const before = { ...config };
   const { context, runtime, register, reads, writes, registrations, warnings } = mountedConfigHarness(config);
   register();
   register();
   assert.deepEqual(config, before, 'registration does not mutate the loaded config');
-  assert.deepEqual({ ...writes[0][2] }, before);
+  assert.deepEqual({ ...writes[0][2] }, {
+    ...before, notifications_enabled: false, all_bug_markers_enabled: true, wiki_hints_enabled: true,
+  });
   assert.equal(reads.length, 1);
   assert.equal(writes.length, 1);
   assert.equal(warnings.length, 0);
@@ -1050,6 +1055,213 @@ test('mounted config preserves custom primary and alternate keybindings while wr
     assert.deepEqual(Array.from(runtime.keybind_rows[index].bindings),
       [config[action.key], config[`${action.key}_alternate`]].filter(Boolean));
   }
+});
+
+function preferenceSessionHarness(store) {
+  const h = mountedConfigHarness({});
+  const feedback = [];
+  h.context.mmapi_config_read_valid = (...args) => {
+    h.reads.push(args);
+    return store.value?.__config_version === args[1] ? structuredClone(store.value) : {};
+  };
+  h.context.mmapi_config_write = (mod, version, config) => {
+    const serialized = JSON.parse(JSON.stringify({ ...config, __config_version: version }));
+    h.writes.push([mod, version, serialized]);
+    if (!store.failWrites) store.value = serialized;
+  };
+  h.context.__MistriaCompanion_notify = text => { feedback.push(text); return true; };
+  h.register();
+  return { ...h, feedback };
+}
+
+test('fresh and legacy configs default automatic alerts off, all bugs on, and wiki hints on', () => {
+  for (const value of [undefined, { __config_version: 1, mounted_interactions_enabled: false, wiki: 'F11' }]) {
+    const store = { value };
+    const h = preferenceSessionHarness(store);
+    assert.equal(h.runtime.notifications_enabled, false);
+    assert.equal(h.runtime.all_bug_markers_enabled, true);
+    assert.equal(h.runtime.wiki_hints_enabled, true);
+    assert.equal(store.value.notifications_enabled, false);
+    assert.equal(store.value.all_bug_markers_enabled, true);
+    assert.equal(store.value.wiki_hints_enabled, true);
+    assert.equal(h.feedback.length, 0, 'startup must not announce default settings');
+    assert.equal(h.runtime.bindings.notifications, 'F10');
+    assert.equal(h.runtime.keybind_rows.at(-1).title, 'Toggle automatic alerts');
+    if (value) {
+      assert.equal(h.runtime.mounted_interactions_enabled, false);
+      assert.equal(store.value.wiki, 'F11');
+    }
+  }
+});
+
+test('F8, F9, and F10 choices persist as booleans across fresh sessions and save resets', () => {
+  const store = {};
+  const first = preferenceSessionHarness(store);
+  first.context.MistriaCompanion_toggle_notifications();
+  first.context.MistriaCompanion_toggle_all_bug_markers();
+  first.context.MistriaCompanion_toggle_wiki_hints();
+  assert.deepEqual(first.feedback, [
+    'Automatic alerts enabled.', 'Ordinary bug map markers disabled.', 'Wiki hints disabled.',
+  ]);
+  assert.equal(store.value.notifications_enabled, true);
+  assert.equal(store.value.all_bug_markers_enabled, false);
+  assert.equal(store.value.wiki_hints_enabled, false);
+  for (const key of ['notifications_enabled', 'all_bug_markers_enabled', 'wiki_hints_enabled']) {
+    assert.equal(typeof store.value[key], 'boolean');
+  }
+  const second = preferenceSessionHarness(store);
+  assert.equal(second.runtime.notifications_enabled, true);
+  assert.equal(second.runtime.all_bug_markers_enabled, false);
+  assert.equal(second.runtime.wiki_hints_enabled, false);
+  second.runtime.clock_paused = true;
+  second.context.MistriaCompanion_reset_save({});
+  assert.equal(second.runtime.notifications_enabled, true);
+  assert.equal(second.runtime.all_bug_markers_enabled, false);
+  assert.equal(second.runtime.wiki_hints_enabled, false);
+  assert.equal(second.runtime.clock_paused, false, 'clock pause remains gameplay state, not a saved preference');
+  second.runtime.dig_spot_notice = { grid: 'old-scene' };
+  second.context.MistriaCompanion_toggle_notifications();
+  assert.equal(second.runtime.dig_spot_notice, undefined);
+  assert.equal(store.value.notifications_enabled, false);
+  assert.equal(preferenceSessionHarness(store).runtime.notifications_enabled, false);
+});
+
+test('saved display preferences reject non-booleans with warnings and preserve explicit false', () => {
+  const defaults = { notifications_enabled: false, all_bug_markers_enabled: true, wiki_hints_enabled: true };
+  for (const [key, fallback] of Object.entries(defaults)) {
+    for (const invalid of ['true', 'false', 0, 1, [], {}]) {
+      const store = { value: { __config_version: 1, [key]: invalid } };
+      const h = preferenceSessionHarness(store);
+      assert.equal(h.runtime[key], fallback);
+      assert.equal(store.value[key], fallback);
+      assert.ok(h.warnings.some(([, message]) => message.includes(`Invalid ${key}`)));
+    }
+    for (const value of [true, false]) {
+      const h = preferenceSessionHarness({ value: { __config_version: 1, [key]: value } });
+      assert.equal(h.runtime[key], value);
+      assert.equal(h.warnings.length, 0);
+    }
+  }
+});
+
+test('F10 migrates old dig-notification bindings without overriding explicit new bindings', () => {
+  const store = { value: { __config_version: 1,
+    dig_notifications: 'DELETE', dig_notifications_alternate: 'SHIFT+DELETE',
+  } };
+  const h = preferenceSessionHarness(store);
+  assert.equal(h.runtime.bindings.notifications, 'DELETE');
+  assert.deepEqual(Array.from(h.runtime.keybind_rows.at(-1).bindings), ['DELETE', 'SHIFT+DELETE']);
+  assert.equal(store.value.notifications, 'DELETE');
+  assert.equal(store.value.notifications_alternate, 'SHIFT+DELETE');
+  assert.equal(store.value.dig_notifications, undefined);
+  assert.equal(h.registrations.at(-1).callback, h.context.MistriaCompanion_toggle_notifications);
+  const explicit = preferenceSessionHarness({ value: { __config_version: 1,
+    notifications: 'HOME', notifications_alternate: '',
+    dig_notifications: 'DELETE', dig_notifications_alternate: 'SHIFT+DELETE',
+  } });
+  assert.equal(explicit.runtime.bindings.notifications, 'HOME');
+  assert.deepEqual(Array.from(explicit.runtime.keybind_rows.at(-1).bindings), ['HOME']);
+});
+
+test('saving preferences preserves current bindings and mounted configuration and reports failed writes', () => {
+  const store = {};
+  const h = preferenceSessionHarness(store);
+  store.value.wiki = 'SHIFT+F7';
+  store.value.mounted_interactions_enabled = false;
+  store.value.future_setting = { enabled: true };
+  h.context.MistriaCompanion_toggle_notifications();
+  assert.equal(store.value.wiki, 'SHIFT+F7');
+  assert.equal(store.value.mounted_interactions_enabled, false);
+  assert.deepEqual(store.value.future_setting, { enabled: true });
+  store.failWrites = true;
+  h.context.MistriaCompanion_toggle_all_bug_markers();
+  assert.equal(h.runtime.all_bug_markers_enabled, false, 'the current session still applies the requested change');
+  assert.equal(store.value.all_bug_markers_enabled, true, 'a failed write does not pretend to persist');
+  assert.match(h.feedback.at(-1), /Preference not saved/);
+  assert.ok(h.warnings.some(([, message]) => message.includes('could not be saved')));
+  store.failWrites = false;
+  assert.equal(preferenceSessionHarness(store).runtime.all_bug_markers_enabled, true);
+});
+
+test('automatic rare alerts stay off while observations and explicitly requested replay keep working', () => {
+  const runtime = { notifications_enabled: false, legendary_day: '1', legendary_sightings: [],
+    seen_spawns: {}, frame: 1000, replay_frame: -180 };
+  const messages = [];
+  const context = load([
+    privateName('has_name'), privateName('track_legendary'), publicName('show_legendary_sightings'),
+  ], {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_legendary_day_key: () => '1',
+    __MistriaCompanion_ready: () => true,
+    __MistriaCompanion_location_name: () => 'The Narrows',
+    __MistriaCompanion_name: item => item.name,
+    __MistriaCompanion_notify: text => messages.push(text),
+    CURRENT_LOCATION_ID: 1,
+    global: { __item_data: [{ name: 'Legendary Fish' }, { name: 'Rare Bug' }] },
+  });
+  context.__MistriaCompanion_track_legendary('Legendary Fish', 0);
+  context.__MistriaCompanion_track_legendary('Very Rare Bug', 1);
+  assert.equal(messages.length, 0);
+  assert.equal(runtime.legendary_sightings.length, 2);
+  context.MistriaCompanion_show_legendary_sightings();
+  assert.equal(messages.length, 2, 'F6 is a deliberate request and is not silenced');
+  runtime.notifications_enabled = true;
+  runtime.seen_spawns = {};
+  runtime.legendary_sightings = [];
+  context.__MistriaCompanion_track_legendary('Very Rare Bug', 1);
+  assert.equal(messages.length, 3);
+  assert.match(messages.at(-1), /Very Rare Bug: Rare Bug/);
+});
+
+test('mine-floor summaries respect automatic-alert preference without delaying floor initialization', () => {
+  const runtime = { notifications_enabled: false, mine_bug_floor: '', mine_bug_delay: 0 };
+  const messages = [];
+  const runner = { current_floor: 1, current_level: () => ({ impl: 'caves' }) };
+  const context = load([privateName('name_index'), publicName('show_mine_bug_spawns')], {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_name: item => item.name,
+    DUNGEON_RUNNER: runner, GRID: { is_setup: true }, BUGS: {},
+    global: { __item_data: [{ name: 'Moth' }] },
+    obj_bug: 'bug', instance_number: () => 2, instance_find: () => ({ item_id: 0 }),
+    room: () => 'mines',
+    ANCHOR: { wrap_for_local: value => value },
+    create_notification: text => messages.push(text),
+  });
+  context.MistriaCompanion_show_mine_bug_spawns();
+  context.MistriaCompanion_show_mine_bug_spawns();
+  assert.equal(runtime.mine_bug_delay, -1);
+  assert.equal(messages.length, 0);
+  runtime.notifications_enabled = true;
+  context.MistriaCompanion_show_mine_bug_spawns();
+  assert.equal(messages.length, 0, 'enabling alerts does not replay an old floor summary');
+  runner.current_floor++;
+  context.MistriaCompanion_show_mine_bug_spawns();
+  context.MistriaCompanion_show_mine_bug_spawns();
+  assert.deepEqual(messages, ['Mine bugs: Moth x2']);
+});
+
+test('wiki hints and action feedback remain visible while automatic alerts are off', () => {
+  const runtime = { notifications_enabled: false, wiki_hints_enabled: true,
+    wiki_title: 'Apple', wiki_hint_title: '', bindings: { wiki: 'F7' } };
+  const messages = [];
+  const nodes = [];
+  const menu = {
+    toasts: { is_empty: () => nodes.length === 0, last: () => nodes.at(-1) },
+    create_notification(text) {
+      messages.push(text);
+      nodes.push({ board_get: () => undefined, board_set() {}, set_y() {} });
+      return true;
+    },
+  };
+  const context = load([privateName('notify'), privateName('show_wiki_hint')], {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_menu: () => menu,
+    Menu: { InfoToasts: 'toasts' },
+    ANCHOR: { wrap_for_local: value => value },
+  });
+  context.__MistriaCompanion_show_wiki_hint();
+  context.__MistriaCompanion_notify('Wiki link copied to clipboard.', 60);
+  assert.deepEqual(messages, ['F7 Wiki', 'Wiki link copied to clipboard.']);
 });
 
 function mountedHarness() {
@@ -2646,6 +2858,7 @@ test('museum wiki title lookup uses English names only and never changes the act
 
 test('museum wiki hints can be disabled without hiding names or changing registered bindings', () => {
   const h = museumHarness();
+  h.context.__MistriaCompanion_save_preferences = () => true;
   h.runtime.wiki_hints_enabled = true;
   h.runtime.bindings.wiki = 'SHIFT+F7';
   h.context.MistriaCompanion_toggle_wiki_hints();
@@ -2688,7 +2901,7 @@ function settingsHarness() {
   const created = [];
   const callbacks = [
     'toggle_clock', 'show_legendary_sightings', 'open_wiki',
-    'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_dig_spot_notifications',
+    'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications',
   ];
   const context = load([
     privateName('hotkey_actions'), privateName('keybind_names'),
@@ -2849,7 +3062,7 @@ test('Mist Spot lookup reads the active index, including zero, and rejects inval
 
 test('Mist Spots appear in unvisited map areas, link to the wiki, and follow consumption and daily changes', () => {
   const runtime = {
-    all_bug_markers_enabled: false, dig_spot_notifications_enabled: false,
+    all_bug_markers_enabled: false, notifications_enabled: false,
     map_menu: { selected_location_id: 1, hide_requests: 0 },
     map_wiki_nodes: [], map_signature: '', dig_spot_visit_key: '', dig_spots: [],
   };
@@ -3071,6 +3284,251 @@ test('tooltip bounds keep a store tooltip inside the screen without erasing its 
   assert.deepEqual([plate.x, plate.y], [216, 236]);
 });
 
+function digNoticeHarness() {
+  const runtime = {
+    dig_spot_visit_key: '', dig_spot_delay: 0, dig_spots: [], notifications_enabled: true,
+  };
+  const state = { visit: 'day:area:floor:visit', location: 'The Narrows', toastMenuAvailable: true, duplicate: false };
+  const messages = [];
+  const toasts = [];
+  const warnings = [];
+  const menus = {};
+  const toastMenu = {
+    toasts: { last: () => { assert.ok(toasts.length); return toasts.at(-1); } },
+    create_notification(text, duck) {
+      if (state.duplicate) return false;
+      messages.push({ text, duck });
+      toasts.push({
+        alpha: 1, freed: false,
+        set_alpha(alpha) { this.alpha = alpha; return this; },
+        set_think_callback(callback, args) { this.think = () => callback(...args); return this; },
+      });
+      return true;
+    },
+  };
+  const context = load([
+    'menu', 'scan_dig_spots', 'dig_spot_active', 'dig_notice_blocked',
+  ].map(privateName).concat([
+    'detect_dig_spots', 'show_dig_spot_notice', 'dig_notice_think', 'reset_save',
+  ].map(publicName)), {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_dig_spot_visit_key: () => state.visit,
+    __MistriaCompanion_dig_spot_location_name: () => state.location,
+    MIST: { running: false },
+    PAUSE_STATUS: 0,
+    PauseStatus: { CUTSCENE: 1 },
+    Menu: { Textbox: 'textbox', InfoToasts: 'toasts' },
+    ObjectId: { DigSite: 'dig' },
+    has_flag: (value, flag) => (value & flag) !== 0,
+    ANCHOR: {
+      wrap_for_local: value => value,
+      get_menu: kind => kind === 'toasts' ? (state.toastMenuAvailable ? toastMenu : undefined) : menus[kind],
+    },
+    mmapi_warn_rate_limited: (...args) => warnings.push(args),
+    create_notification: () => assert.fail('scanning must not emit a notice directly'),
+  });
+  const grid = {
+    is_setup: true, node_len: 4,
+    node_object_id: ['dig', 'dig', 'dig', 'other'],
+    node_top_left_x: [1, 1, 2, 3], node_top_left_y: [1, 1, 1, 1],
+    try_node_index_for_cell(x, y) {
+      const index = this.node_top_left_x.findIndex((value, i) => value === x && this.node_top_left_y[i] === y);
+      return index < 0 ? undefined : index;
+    },
+  };
+  context.GRID = grid;
+  const detect = context.MistriaCompanion_detect_dig_spots;
+  const show = context.MistriaCompanion_show_dig_spot_notice;
+  const wait = count => { for (let i = 0; i < count; i++) show(); };
+  const scan = () => { detect(); detect(); };
+  return { context, runtime, state, grid, menus, messages, toasts, warnings, detect, show, wait, scan };
+}
+
+test('dig scans and map data continue during cutscenes, but notices wait for a clear gameplay interval', () => {
+  const h = digNoticeHarness();
+  h.context.MIST.running = true;
+  h.scan();
+  assert.equal(h.runtime.dig_spots.length, 2, 'multi-cell dig sites remain deduplicated for markers');
+  assert.equal(h.runtime.dig_spot_delay, -1, 'the scan finishes even while a scene is active');
+  assert.ok(h.runtime.dig_spot_notice);
+  h.wait(300);
+  assert.equal(h.messages.length, 0);
+  h.context.MIST.running = false;
+  h.context.PAUSE_STATUS = 1;
+  h.wait(30);
+  assert.equal(h.messages.length, 0, 'the native cutscene pause independently blocks delivery');
+  h.context.PAUSE_STATUS = 0;
+  h.menus.textbox = { hide_requests: 0 };
+  h.wait(30);
+  assert.equal(h.messages.length, 0, 'NPC dialogue also blocks delivery without a running scene');
+  h.menus.textbox.close_requested = true;
+  h.wait(12);
+  assert.equal(h.messages.length, 0);
+  h.show();
+  assert.deepEqual(h.messages, [{ text: 'Dig spots: 2 - The Narrows', duck: 180 }]);
+  h.wait(100);
+  assert.equal(h.messages.length, 1, 'a finished scan does not send the notice repeatedly');
+});
+
+test('muted automatic alerts still scan dig spots for map markers without queuing a notice', () => {
+  const h = digNoticeHarness();
+  h.runtime.notifications_enabled = false;
+  h.scan();
+  assert.equal(h.runtime.dig_spots.length, 2);
+  assert.equal(h.runtime.dig_spot_notice, undefined);
+  h.wait(30);
+  assert.equal(h.messages.length, 0);
+  h.runtime.notifications_enabled = true;
+  h.wait(30);
+  assert.equal(h.messages.length, 0, 'do not replay a past visit merely because alerts were enabled');
+  h.state.visit = 'next visit';
+  h.scan();
+  h.wait(13);
+  assert.equal(h.messages.length, 1);
+});
+
+test('a cutscene beginning during the dig-notice delay restarts the clear interval', () => {
+  const h = digNoticeHarness();
+  h.scan();
+  h.wait(6);
+  h.context.MIST.running = true;
+  h.show();
+  assert.equal(h.runtime.dig_spot_notice.wait_frames, 12);
+  h.context.MIST.running = false;
+  h.wait(12);
+  assert.equal(h.messages.length, 0);
+  h.context.PAUSE_STATUS = 1;
+  h.show();
+  assert.equal(h.messages.length, 0, 'a scene starting on the delivery frame still blocks the notice');
+  h.context.PAUSE_STATUS = 0;
+  h.wait(13);
+  assert.equal(h.messages.length, 1);
+});
+
+test('dig notices from a previous area, day, floor, or grid are discarded', () => {
+  for (const change of [
+    h => { h.state.visit = 'different area'; },
+    h => { h.state.visit = 'different day'; },
+    h => { h.state.visit = 'different floor'; },
+    h => { h.context.GRID = { ...h.grid }; },
+    h => { h.context.GRID = undefined; },
+  ]) {
+    const h = digNoticeHarness();
+    h.context.MIST.running = true;
+    h.scan();
+    change(h);
+    h.context.MIST.running = false;
+    h.wait(30);
+    assert.equal(h.runtime.dig_spot_notice, undefined);
+    assert.equal(h.messages.length, 0);
+  }
+  const h = digNoticeHarness();
+  h.scan();
+  h.state.visit = 'new area';
+  h.state.location = 'Eastern Road';
+  h.detect();
+  assert.equal(h.runtime.dig_spot_notice, undefined, 'visit reset drops the prior notice before scanning');
+  h.detect();
+  h.wait(13);
+  assert.equal(h.messages[0].text, 'Dig spots: 2 - Eastern Road');
+});
+
+test('deferred dig notices count only remaining active sites and omit an empty area', () => {
+  const h = digNoticeHarness();
+  h.scan();
+  h.grid.node_object_id[2] = 'other';
+  h.wait(13);
+  assert.equal(h.messages[0].text, 'Dig spots: 1 - The Narrows');
+  const empty = digNoticeHarness();
+  empty.scan();
+  empty.grid.node_object_id.fill('other');
+  empty.wait(13);
+  assert.equal(empty.messages.length, 0);
+  assert.equal(empty.runtime.dig_spot_notice, undefined);
+});
+
+test('disabling dig notices or resetting the save cancels a pending notice without losing marker scans', () => {
+  const h = digNoticeHarness();
+  h.scan();
+  h.runtime.notifications_enabled = false;
+  h.show();
+  assert.equal(h.runtime.dig_spot_notice, undefined);
+  assert.equal(h.runtime.dig_spots.length, 2);
+  h.runtime.notifications_enabled = true;
+  h.wait(30);
+  assert.equal(h.messages.length, 0);
+  h.state.visit = 'new visit';
+  h.scan();
+  assert.ok(h.runtime.dig_spot_notice);
+  h.context.MistriaCompanion_reset_save({});
+  assert.equal(h.runtime.dig_spot_notice, undefined);
+  h.wait(30);
+  assert.equal(h.messages.length, 0);
+});
+
+test('dig scans retry unready data, and delayed notification menus do not lose the pending count', () => {
+  const h = digNoticeHarness();
+  const ids = h.grid.node_object_id;
+  h.grid.node_object_id = undefined;
+  h.scan();
+  assert.equal(h.runtime.dig_spot_notice, undefined);
+  assert.equal(h.runtime.dig_spot_delay, 0);
+  assert.equal(h.warnings.length, 1);
+  h.grid.node_object_id = ids;
+  h.detect();
+  h.state.toastMenuAvailable = false;
+  h.wait(13);
+  assert.equal(h.warnings.length, 2);
+  assert.ok(h.runtime.dig_spot_notice);
+  h.state.toastMenuAvailable = true;
+  h.show();
+  assert.equal(h.messages.length, 1);
+  const duplicate = digNoticeHarness();
+  duplicate.state.duplicate = true;
+  duplicate.scan();
+  duplicate.wait(30);
+  assert.equal(duplicate.runtime.dig_spot_notice, undefined, 'respect the native notification deduplication');
+  assert.equal(duplicate.toasts.length, 0);
+});
+
+test('already-visible dig notices are hidden when a cutscene starts without altering other toast state', () => {
+  const h = digNoticeHarness();
+  h.scan();
+  h.wait(13);
+  const toast = h.toasts[0];
+  toast.timer = 100;
+  const otherToast = { alpha: 1 };
+  toast.think();
+  assert.equal(toast.alpha, 1);
+  h.context.MIST.running = true;
+  toast.think();
+  assert.equal(toast.alpha, 0);
+  assert.equal(toast.timer, 100, 'leave the native toast lifecycle and queue ordering untouched');
+  assert.equal(otherToast.alpha, 1);
+  h.context.MIST.running = false;
+  toast.think();
+  assert.equal(toast.alpha, 0, 'an old notice does not reappear after its scene interruption');
+  toast.freed = true;
+  toast.set_alpha = () => assert.fail('do not touch a freed toast');
+  h.context.PAUSE_STATUS = 1;
+  toast.think();
+});
+
+test('dig-notice scene checks handle absent MIST and hidden or closing dialogue menus', () => {
+  const h = digNoticeHarness();
+  const blocked = h.context.__MistriaCompanion_dig_notice_blocked;
+  h.context.MIST = undefined;
+  assert.equal(blocked(), false);
+  h.menus.textbox = { hide_requests: 1 };
+  assert.equal(blocked(), false);
+  h.menus.textbox.hide_requests = 0;
+  assert.equal(blocked(), true);
+  h.menus.textbox.free_requested = true;
+  assert.equal(blocked(), false);
+  h.context.PAUSE_STATUS = 1 | 2 | 4;
+  assert.equal(blocked(), true);
+});
+
 test('tick retries initialization, resets visit/day observations, and throttles map work', () => {
   const runtime = {};
   let ready = false;
@@ -3095,6 +3553,7 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     __MistriaCompanion_legendary_day_key: () => day,
     __MistriaCompanion_map_hubs: () => [],
     MistriaCompanion_detect_dig_spots: () => { scans++; runtime.dig_spot_delay = -1; },
+    MistriaCompanion_show_dig_spot_notice: () => { assert.equal(ready, true); },
     MistriaCompanion_show_mine_bug_spawns: () => { runtime.mine_bug_delay = -1; },
     MistriaCompanion_track_legendary_spawns: () => {},
     MistriaCompanion_update_birthday_label: () => {},
