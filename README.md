@@ -14,11 +14,11 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Reveals names when hovering darkened collection items in all four Museum wings, with individual item wiki links.
 - Shows villager names when hovering known NPC map markers.
 - Displays today's birthdays below the mana meter.
-- Announces legendary fish and very rare bug spawns.
-- Groups active bugs into one marker per map hub, with species and counts on hover and ordinary bugs available on demand.
-- Announces active dig spots when entering a location or mine floor and marks their general areas at the nearest map hubs.
+- Offers optional alerts for legendary fish and very rare bug spawns.
+- Groups active bugs into one marker per map hub, with species and counts on hover and ordinary bugs shown by default.
+- Optionally announces active dig spots when entering a location or mine floor and marks their general areas at the nearest map hubs.
 - Reveals the active daily Mist Spot on its area's map, even before visiting that area.
-- Lists bugs initially spawned on each newly entered mine floor.
+- Optionally lists bugs initially spawned on each newly entered mine floor.
 - Pauses natural clock progression without pausing gameplay or overriding the game's own clock stops.
 - Lists the mod's active keybindings on the otherwise-empty right side of the Settings landing page.
 
@@ -31,9 +31,9 @@ The mod uses the live item, recipe, NPC, fish, bug, calendar, and map data shipp
 
 ## Installation
 
-1. Download the release ZIP and extract it.
+1. Download the mod ZIP from the [latest release](https://github.com/kappiana/mistria-companion/releases/latest) and extract it. Use the `MistriaCompanion-v...zip` download, not the source-code archives.
 2. Copy the `MistriaCompanion` folder into the game's `mods` folder.
-3. Start MOMI, select **Mistria Companion**, and choose **Install**.
+3. Open or restart MOMI, select **Mistria Companion**, and choose **Install**.
 4. Launch Fields of Mistria.
 
 The installed layout should be:
@@ -56,6 +56,28 @@ For an existing Mistria Companion installation, close the game and replace the o
 again. Do not keep two copies of either mod selected. Back up saves before testing
 a new mod version; the companion itself does not write custom data into your saves.
 
+## Defaults and saved choices
+
+You do not need to edit a file to use the mod. These defaults apply on the first
+launch, or when upgrading without a saved preference:
+
+| Setting | Default | Change it with |
+| --- | --- | --- |
+| Automatic alerts for rare spawns, dig spots, and mine-floor bugs | **Off** | **F10** |
+| Ordinary bugs on the map, alongside very rare bugs | **On** | **F9** |
+| Compact `F7 Wiki` hints | **On** | **F8** |
+
+**Your F8, F9, and F10 choices are saved immediately and restored next time you
+play.** A saved choice takes priority over the defaults, including when you load
+a different save.
+
+F10 only controls automatic alerts. It does **not** hide wiki hints, map markers,
+birthdays, or feedback for actions you take, such as copying a wiki link.
+You can still press **F6** to replay recorded rare sightings while alerts are off.
+
+When dig alerts are enabled, they wait until cutscenes and NPC dialogue end.
+They appear afterward only if you are still in the same area or mine-floor visit.
+
 ## Controls
 
 | Key | Action |
@@ -63,9 +85,9 @@ a new mod version; the companion itself does not write custom data into your sav
 | **F5** | Pause natural clock progression or release the companion's pause. |
 | **F6** | Replay legendary fish and very rare bug sightings from the current day. |
 | **F7** | Copy the relevant Fields of Mistria Wiki URL while supported content is selected or hovered. |
-| **F8** | Toggle the compact `F7 Wiki` hints for the current session. |
-| **F9** | Toggle ordinary bug map markers for the current session. |
-| **F10** | Toggle dig-spot notifications for the current session. |
+| **F8** | Show or hide the compact `F7 Wiki` hints. |
+| **F9** | Show or hide ordinary bug map markers. |
+| **F10** | Turn automatic spawn and dig-spot alerts on or off. |
 
 Paste copied wiki links into a browser with `Ctrl+V`.
 
@@ -77,7 +99,9 @@ Graphics, Audio, Accessibility, Controls, or Exit replaces it with the game's
 normal options. Long binding lists scroll with the mouse wheel or the controller's
 right stick while on the Settings landing page.
 
-F7 resolves the current visible context when pressed; it does not copy the last
+### Wiki links and Museum items
+
+F7 uses what you are currently selecting or hovering; it does not copy the last
 item you happened to inspect. A mixed-species bug marker links to the wiki's Bugs
 page; a single-species marker links to that bug.
 
@@ -92,20 +116,26 @@ currently require the game's English language setting. Other languages still
 show localized hover names, but copy the wing page rather than an incorrect
 English wiki URL; the mod does not change your language setting.
 
+### Pausing the clock
+
 While the companion owns a clock pause, **Clock paused** appears below the mana
 meter. Releasing it does not undo a cutscene or another mod's pause. Sleeping,
 crafting, and other scripted time changes are not frozen. Loading a save or
-returning to the title screen clears the pause and recorded sightings. F8, F9,
-and F10 toggle states last until the game is closed; their startup defaults are
-wiki hints on, ordinary bug markers off, and dig notifications on.
+returning to the title screen clears the pause and recorded sightings. Unlike
+the F8/F9/F10 preferences, the clock pause does not carry over to a new session.
+
+## Gifts and cooking
+
+### Grab loved gifts from a chest
 
 When a regular chest is open, use the gift button above its inventory to collect
-up to one loved gift per eligible villager from that chest. Its selection
-objective is birthday coverage first, then total villager coverage, then stable
-villager order. A birthday gift can take priority even if fewer total gifts fit.
-The picker accounts for overlapping preferences, partial stacks, and item
-variants. It does not mark a villager as gifted until the gift is actually given.
-Repeated clicks can collect another set while those villagers remain ungifted.
+up to one loved gift per met villager who has not received a gift today.
+Birthday villagers get priority; then the picker tries to cover as many other
+villagers as your backpack space allows. It accounts for shared preferences,
+partial stacks, and item variants.
+
+Collecting a gift does not mark it as given. Repeated clicks can collect another
+set while those villagers remain ungifted.
 
 ### Gift tooltip progress
 
@@ -128,6 +158,8 @@ variant. Meeting a villager or giving a gift is reflected the next time you hove
 the item. Highlights follow the tooltip's position and fade, including in shops.
 No extra save data or configuration is needed.
 
+### Cooking Gift details
+
 At a **cooking station**, select a dish and use the **Gifts** button beside its
 description to open **Gift details**. The popup shows the full liked/loved lists
 with the same highlights, while the dish's original description stays in its
@@ -145,7 +177,7 @@ instead of a redundant list.
 This checks all villagers, not just those you have met. Ordinary item tooltips
 are unchanged.
 
-### Holding Interact at the Seed Maker
+## Holding Interact at the Seed Maker
 
 Select a seed-compatible crop and face a Seed Maker. Tap **Interact** to process
 one item normally, or keep holding it to process more of the same selected stack.
@@ -164,7 +196,7 @@ inventory slots, bypass interaction restrictions, or repeat other machines,
 conversations, or item use. Existing single-press behavior is unchanged.
 The Seed Maker's separate **Inspect** action remains available and does not repeat.
 
-### Talking, gifting, and quest hand-ins while mounted
+## Talking, gifting, and quest hand-ins while mounted
 
 Use the normal **Talk** or **Give item** control near a villager while riding.
 Select a gift in your toolbar as usual. Ordinary conversations leave you mounted;
@@ -188,11 +220,16 @@ change automatic story triggers. Jumping, dismounting, and scripted cutscene
 transitions keep their normal behavior; a quest that starts a cutscene may still
 handle your mount as part of that scene.
 
-Mounted talking, gifting, quest hand-ins, and Gossip are enabled by default. To disable them, close the
-game, set `"mounted_interactions_enabled": false` in the configuration file below,
-and restart. This setting does not add or change any hotkeys.
+Mounted talking, gifting, quest hand-ins, and Gossip are enabled by default.
+To disable them, close the game, set `"mounted_interactions_enabled": false`
+in the configuration file below, and restart. This setting does not add or
+change any hotkeys.
 
-### Remapping keys
+## Remapping keys and advanced settings
+
+**File editing is optional.** Use F8, F9, and F10 in-game to change and save the
+display preferences. Edit this file only if you want different keybindings or
+to change a setting manually.
 
 After the first launch, close the game and edit:
 
@@ -206,6 +243,9 @@ The file contains these defaults:
 {
   "__config_version": 1,
   "mounted_interactions_enabled": true,
+  "notifications_enabled": false,
+  "all_bug_markers_enabled": true,
+  "wiki_hints_enabled": true,
   "clock": "F5",
   "clock_alternate": "",
   "sightings": "F6",
@@ -216,8 +256,8 @@ The file contains these defaults:
   "wiki_hints_alternate": "",
   "bugs": "F9",
   "bugs_alternate": "",
-  "dig_notifications": "F10",
-  "dig_notifications_alternate": ""
+  "notifications": "F10",
+  "notifications_alternate": ""
 }
 ```
 
@@ -226,14 +266,50 @@ uppercase names such as `F7`, `HOME`, `GAMEPAD_Y`, and chords such as `SHIFT+F7`
 Use an empty string for no alternate. Invalid primary bindings fall back to their
 defaults; invalid alternates are disabled. Duplicate bindings within the mod are
 ignored after the first registration and logged. The wiki hint uses the registered
-wiki binding. Restart the game after editing. Bindings and the mounted-interaction
-setting persist in this file, but the session toggle states do not.
+wiki binding. Restart the game after editing. Bindings, the mounted-interaction
+setting, and the three display preferences persist in this file. The F8/F9/F10
+toggles update their preferences without changing your keybindings. Existing
+`dig_notifications` and `dig_notifications_alternate` bindings migrate to
+`notifications` and `notifications_alternate`, so remapped F10 controls are
+preserved when upgrading.
 
 ## Spawn information
 
-Legendary fish and very rare bugs are announced only after they actually spawn in a map you visit. Sightings are deduplicated by species and location for the current day. Active very rare bugs are always included at their nearest map hub rather than their exact world position. Press **F9** to also include every other active bug in the current area for the rest of the session. Each hub has one bug marker; hover it for the species and counts. A very rare species supplies the icon when the group contains one.
+### Automatic alerts and rare sightings
 
-Active dig spots are counted once after each location or mine floor finishes loading. Press **F10** to disable or re-enable the count notification for the current session; this does not disable scanning or map markers. Opening the corresponding map groups the spots at their nearest map hubs with a native-size outlined shovel marker, offset to the opposite side from the bug marker. The count appears only on hover. Used dig spots disappear from the map count.
+Automatic alerts for legendary fish, very rare bugs, dig spots, and new mine-floor
+bug summaries are **off by default**. Press **F10** to enable or disable them as a
+group; your choice is remembered next time you play. Enabling alerts affects new
+spawns and visits rather than replaying old notices.
+
+Legendary fish and very rare bugs are recorded only after they actually spawn in
+a map you visit. Sightings are deduplicated by species and location for the
+current day, even while alerts are off. **F6** replays them on request.
+
+### Bugs on the map
+
+All active bug species are shown on the map by default, grouped at the nearest
+map hubs rather than exact world positions. Press **F9** to hide ordinary species
+or show them again; this choice persists. Very rare species remain included.
+Each hub has one marker; hover it for the species and counts. A very rare species
+supplies the icon when the group contains one. Turning automatic alerts off
+does not change bug-map visibility.
+
+### Dig spots and cutscenes
+
+Active dig spots are counted once after each location or mine floor finishes
+loading. F10 controls the optional count notification, not scanning or map markers.
+On the map, outlined shovel markers group nearby dig spots at map hubs. Hover a
+marker to see the count. Used spots disappear from that count.
+
+Dig-spot notices wait until cutscenes and NPC dialogue have ended. A deferred
+notice is shown shortly afterward only if you are still in the same area or
+mine-floor visit, using the number of spots still active. Leaving the area,
+loading another save, or disabling automatic alerts discards the pending notice.
+If a cutscene starts while a dig notice is visible, that notice is hidden.
+Scanning and map markers are unaffected.
+
+### Daily Mist Spot
 
 The active daily **Mist Spot** is shown with the native **Mist Sight** skill icon.
 Browse the map's area tabs to locate it; you do not need to visit its area first.
@@ -243,7 +319,11 @@ This marker is independent of F9 and F10. It follows the game's active Mist Spot
 state, disappears after the spot is used, and updates when the daily spot changes.
 It does not unlock Mist Sight, create a spot, spend Essence, or change rewards.
 
-On entering a newly generated mine floor, a compact `Mine bugs:` notification lists the bugs initially present. Duplicate species include a count.
+### Mine-floor bug summaries
+
+With automatic alerts enabled, entering a newly generated mine floor shows a
+compact `Mine bugs:` notification listing the bugs initially present. Duplicate
+species include a count.
 
 ## Known limitations
 
@@ -258,6 +338,10 @@ On entering a newly generated mine floor, a compact `Mine bugs:` notification li
 - Mods that replace or add Seed Maker interactions can disable hold-to-repeat; normal single-press controls remain available.
 
 ## Troubleshooting
+
+If a toggle says **Preference not saved**, the change applies only to the current
+session. Check the log below and make sure the game can write to its `mod_data`
+folder.
 
 Keybinding and companion warnings are logged at:
 
