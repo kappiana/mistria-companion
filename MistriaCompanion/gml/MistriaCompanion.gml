@@ -195,7 +195,10 @@ function __MistriaCompanion_mounted_condition() {
     if (!instance_exists(_npc)) return false;
     if (_npc.npc_id == NpcId.Caldarus && caldarus_is_sleeping()) return false;
 
-    // Mirror the native predicates without ari_can_talk's mount veto.
+    // Mirror each native predicate without its mount veto.
+    if (self.quest) {
+        return !_npc.my_query_quests().is_empty();
+    }
     if (self.gossip) {
         return QUEST_LOG.completed.contains("gossip_for_elsie");
     }
@@ -210,7 +213,7 @@ function __MistriaCompanion_mounted_condition() {
         && npc_is_unlocked(_npc.npc_id);
 }
 
-function __MistriaCompanion_wrap_mounted_interaction(_npc, _interaction, _gift, _gossip=false) {
+function __MistriaCompanion_wrap_mounted_interaction(_npc, _interaction, _gift, _gossip=false, _quest=false) {
     if (__MistriaCompanion_field(_interaction, "__mistria_companion_mounted") != undefined) return;
     if (typeof(__MistriaCompanion_field(_interaction, "can_interact_callback")) != "method"
         || typeof(__MistriaCompanion_field(_interaction, "callback")) != "method")
@@ -223,6 +226,7 @@ function __MistriaCompanion_wrap_mounted_interaction(_npc, _interaction, _gift, 
         npc: _npc,
         gift: _gift,
         gossip: _gossip,
+        quest: _quest,
         original: _interaction.can_interact_callback
     };
     _interaction.__mistria_companion_mounted = _context;
@@ -247,9 +251,11 @@ function __MistriaCompanion_install_mounted_npc(_npc) {
     var _talk = undefined;
     var _gift = undefined;
     var _gossip = undefined;
+    var _quest = undefined;
     var _talk_count = 0;
     var _gift_count = 0;
     var _gossip_count = 0;
+    var _quest_count = 0;
     var _talk_first = -1;
     var _talk_last = -1;
     for (var _index = 0; _index < _count; _index++) {
@@ -267,6 +273,9 @@ function __MistriaCompanion_install_mounted_npc(_npc) {
         } else if (_key == "misc_local/give_item" && _input == InputId.Throw) {
             _gift = _interaction;
             _gift_count++;
+        } else if (_key == "misc_local/turn_in_quest_input" && _input == InputId.Interact) {
+            _quest = _interaction;
+            _quest_count++;
         } else if (_npc.npc_id == NpcId.Elsie && _key == "misc_local/gossip"
             && _input == InputId.SecondaryInteract)
         {
@@ -279,14 +288,15 @@ function __MistriaCompanion_install_mounted_npc(_npc) {
         && _talk_first == 0 && _talk_last == _count - 1;
     if (_talk_count == 1 || _caldarus_pair) __MistriaCompanion_wrap_mounted_interaction(_npc, _talk, false);
     if (_gift_count == 1) __MistriaCompanion_wrap_mounted_interaction(_npc, _gift, true);
+    if (_quest_count == 1) __MistriaCompanion_wrap_mounted_interaction(_npc, _quest, false, false, true);
     if (_gossip_count == 1) __MistriaCompanion_wrap_mounted_interaction(_npc, _gossip, false, true);
     if (_npc.npc_id == NpcId.Elsie && _gossip_count != 1) {
         mmapi_warn_rate_limited("mistria_item_details:mounted_gossip", "mistria_item_details",
             "Mounted interactions: missing or duplicate Elsie Gossip; leaving gossip unchanged.");
     }
-    if ((_talk_count != 1 && !_caldarus_pair) || _gift_count != 1) {
+    if ((_talk_count != 1 && !_caldarus_pair) || _gift_count != 1 || _quest_count != 1) {
         mmapi_warn_rate_limited("mistria_item_details:mounted_entries", "mistria_item_details",
-            "Mounted interactions: missing or duplicate talk/gift entries; ambiguous entries were left unchanged.");
+            "Mounted interactions: missing or duplicate talk/gift/quest entries; ambiguous entries were left unchanged.");
     }
     _npc.__mistria_companion_mounted = { list: _interactions, count: _count };
 }
@@ -2344,6 +2354,11 @@ function __MistriaCompanion_for_item(_item) {
     var _item_data = global[$ "__item_data"];
     if (!is_array(_item_data) || _item_id < 0 || _item_id >= array_length(_item_data)) return undefined;
 
+    var _universal = __MistriaCompanion_universal_gift_text(_item);
+    if (_universal != "") {
+        return { recipes: "", liked: "", loved: "", gift_sections: [], universal: _universal };
+    }
+
     var _target = _item_data[_item_id];
     var _item_key = __MistriaCompanion_field(_target, "recipe_key");
     if (_item_key == undefined) _item_key = "";
@@ -2394,6 +2409,7 @@ function __MistriaCompanion_for_item(_item) {
         recipes: _recipe_summary,
         liked: __MistriaCompanion_join(_liked),
         loved: __MistriaCompanion_join(_loved),
+        universal: "",
         gift_sections: [
             { label: "Liked by: ", npcs: _liked_npcs },
             { label: "Loved by: ", npcs: _loved_npcs }
@@ -2402,6 +2418,8 @@ function __MistriaCompanion_for_item(_item) {
 }
 
 function __MistriaCompanion_details_text(_details) {
+    var _universal = __MistriaCompanion_field(_details, "universal");
+    if (is_string(_universal) && _universal != "") return _universal;
     var _result = "";
     if (_details.recipes != "") {
         if (_result != "") _result += "\n";
@@ -2504,17 +2522,19 @@ function __MistriaCompanion_clear_gift_highlights(_body) {
     _body.board_set("mistria_item_details_gift_highlights", undefined);
 }
 
-function __MistriaCompanion_universal_gift(_item) {
+function __MistriaCompanion_universal_gift_text(_item) {
     var _npcs = __MistriaCompanion_as_array(global[$ "__npc_prototypes"]);
     var _eligible = 0;
+    var _summary = "Loved by: Everyone";
     for (var _index = 0; _index < array_length(_npcs); _index++) {
         if (_npcs[_index] == undefined) continue;
         var _desire = __MistriaCompanion_gift_desire_for_npc(_item, _npcs[_index], _index);
         if (_desire == undefined) continue;
-        if (_desire != Desire.Liked && _desire != Desire.Loved) return false;
+        if (_desire != Desire.Liked && _desire != Desire.Loved) return "";
+        if (_desire == Desire.Liked) _summary = "Liked by: Everyone";
         _eligible++;
     }
-    return _eligible > 0;
+    return _eligible > 0 ? _summary : "";
 }
 
 function __MistriaCompanion_cooking_base_text(_text, _details) {
@@ -2532,7 +2552,7 @@ function __MistriaCompanion_cooking_base_text(_text, _details) {
 }
 
 function __MistriaCompanion_cooking_gift_text(_item, _details) {
-    if (__MistriaCompanion_universal_gift(_item)) return "This dish is liked or loved by everyone.";
+    if (_details.universal != "") return _details.universal;
     var _gifts = __MistriaCompanion_details_text({ recipes: "", liked: _details.liked, loved: _details.loved });
     if (_gifts == "") return "No met villagers like or love this dish.";
     return "Highlighted names have already received this dish.\n\n" + _gifts;
@@ -2789,5 +2809,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.44");
+mmapi_mod_declare("mistria_item_details", "1.0.45");
 MistriaCompanion_register();

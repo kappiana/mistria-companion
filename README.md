@@ -9,7 +9,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Adds a cooking-station Gifts button with full liked/loved lists and gift-history highlights for the selected dish.
 - Adds a chest button that grabs one loved gift for each met villager who has not received a gift that day, prioritizing birthdays and available backpack space.
 - Repeats Seed Maker conversions while Interact is held, using the selected stack and normal seed yields.
-- Allows ordinary villager conversations, gifting, and Elsie's Gossip while riding your mount, using the normal controls.
+- Allows ordinary villager conversations, gifting, quest hand-ins, and Elsie's Gossip while riding your mount, using the normal controls.
 - Copies relevant Fields of Mistria Wiki links for items, villagers, calendar birthdays, quest objectives, Museum wings, and map markers.
 - Reveals names when hovering darkened collection items in all four Museum wings, with individual item wiki links.
 - Shows villager names when hovering known NPC map markers.
@@ -114,6 +114,13 @@ unlocked. A soft teal highlight behind a name means you have given that villager
 the hovered item at least once in the current save, not just today. Preferences
 learned through Gossip alone do not count as gifts given.
 
+Universally liked or loved items show only their original description and
+**Liked by: Everyone** or **Loved by: Everyone**, without individual names or
+name highlights. An item is labelled loved only if every eligible villager
+loves it; a mixture of liked and loved preferences is labelled liked. This
+checks the full NPC data, not just villagers you have met, and follows the
+actual item's infusion and special gift rules.
+
 Highlights use the game's existing gift history, so past gifts count immediately.
 That history tracks the base item, not its infusion; different infusions of the
 same item share a highlight, while the liked/loved lists still reflect the hovered
@@ -133,7 +140,8 @@ The popup describes the selected finished dish, not its ingredients. It does
 not require owning the dish or having enough ingredients, and cooking a dish
 does not count as giving it as a gift. It does not predict random infusions
 that might be applied during cooking. For dishes liked or loved by every
-eligible villager, the popup shows a short summary instead of a redundant list.
+eligible villager, the popup shows **Liked by: Everyone** or **Loved by: Everyone**
+instead of a redundant list.
 This checks all villagers, not just those you have met. Ordinary item tooltips
 are unchanged.
 
@@ -156,23 +164,31 @@ inventory slots, bypass interaction restrictions, or repeat other machines,
 conversations, or item use. Existing single-press behavior is unchanged.
 The Seed Maker's separate **Inspect** action remains available and does not repeat.
 
-### Talking and gifting while mounted
+### Talking, gifting, and quest hand-ins while mounted
 
 Use the normal **Talk** or **Give item** control near a villager while riding.
 Select a gift in your toolbar as usual. Ordinary conversations leave you mounted;
 the game still handles the dialogue, item consumption, and friendship changes.
 Normal gift restrictions still apply.
 
+Use the normal **Interact** control at a villager with a quest ready to turn in.
+The game's quest-selection and confirmation popups work while mounted, including
+when more than one quest is ready for that villager. Requirements, required items,
+quest progression, and rewards remain controlled by the game. Opening or
+cancelling the popup does not submit the quest. A hand-in does not use up the
+villager's daily gift allowance.
+
 Elsie's **Gossip** action also works while mounted using its normal secondary
 interaction control, once her introductory gossip quest is complete. Her daily
 limit, cooldown dialogue, available hints, and gift discoveries remain unchanged.
 
-This feature does not unlock quest turn-ins, dates, proposals, kissing, petting,
-or other special interactions while mounted. A villager waiting for a quest
-turn-in may still require you to dismount before talking. Jumping, dismounting,
-and scripted cutscene transitions keep their normal behavior.
+This feature does not unlock dates, proposals, kissing, petting, or other special
+interactions while mounted. It does not bypass incomplete quest requirements or
+change automatic story triggers. Jumping, dismounting, and scripted cutscene
+transitions keep their normal behavior; a quest that starts a cutscene may still
+handle your mount as part of that scene.
 
-Mounted talking, gifting, and Gossip are enabled by default. To disable them, close the
+Mounted talking, gifting, quest hand-ins, and Gossip are enabled by default. To disable them, close the
 game, set `"mounted_interactions_enabled": false` in the configuration file below,
 and restart. This setting does not add or change any hotkeys.
 
@@ -238,7 +254,7 @@ On entering a newly generated mine floor, a compact `Mine bugs:` notification li
 - Long recipe lists are summarized rather than expanded in full.
 - Gift selection has a search limit to avoid long delays. If the notification says that limit was reached, additional gifts may still fit in your backpack.
 - Other mods can register the same hotkeys or change native menus and game data. Remap conflicting keys and test your actual mod combination.
-- Mods that replace villager talk or gift eligibility can conflict with mounted interactions. Disable this feature if another mod needs to control those rules.
+- Mods that replace villager talk, gift, or quest hand-in eligibility can conflict with mounted interactions. Disable this feature if another mod needs to control those rules.
 - Mods that replace or add Seed Maker interactions can disable hold-to-repeat; normal single-press controls remain available.
 
 ## Troubleshooting
