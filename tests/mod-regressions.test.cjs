@@ -734,12 +734,16 @@ function giftTooltipHarness() {
     entry.gifts_given.contains = entry.gifts_given.has.bind(entry.gifts_given);
   }
   const context = load([
-    'npc_is_known', 'npc_needs_gift', 'gift_desire_for_npc', 'join', 'for_item',
-    'compact_gift_text', 'gift_highlight_runs', 'update_gift_highlights',
+    'npc_is_known', 'npc_needs_gift', 'gift_desire_for_npc', 'join', 'for_item', 'details_text',
+    'compact_gift_text', 'gift_highlight_runs', 'clear_gift_highlights', 'update_gift_highlights',
+    'universal_gift', 'cooking_base_text', 'cooking_gift_text',
+    'clear_cooking_details', 'update_cooking_details',
   ].map(privateName).concat([
     publicName('description'), publicName('reset_save'), publicName('update_gift_tooltips'),
+    publicName('show_cooking_gifts'), publicName('cooking_gift_scroll'),
   ]), {
     Desire, Infusion, ItemId: { VoidNewt: 100, VoidCake: 101 }, NpcId: { Juniper: 10, Eiland: 11 },
+    Menu: { Crafting: 'crafting' }, RecipeContext: { Cooking: 'cooking' },
     NPCS: npcs,
     global: { __item_data: [{ recipe_key: 'ore' }], __npc_prototypes: npcs.map(npc => npc.prototype) },
     npc_is_unlocked: id => npcs[id].unlocked,
@@ -753,6 +757,7 @@ function giftTooltipHarness() {
     string_copy: (value, start, count) => Array.from(value).slice(start - 1, start - 1 + count).join(''),
     string_split: (value, separator) => value.split(separator),
     string_replace_all: (value, search, replacement) => value.split(search).join(replacement),
+    mmapi_warn_rate_limited: () => {},
   });
   const describe = (base = 'A rare artifact.') => context.MistriaCompanion_description(base, { item });
   const details = () => context.__MistriaCompanion_for_item(item);
@@ -1609,15 +1614,40 @@ class Node {
   measure() {}
 }
 
-test('gift highlight nodes sit behind native text, reuse layout, and refresh without leaving old nodes', () => {
-  const h = giftTooltipHarness();
-  h.npcs[2].gifts_given.add(0);
+function highlightRendererHarness(h) {
   let rootsCreated = 0;
   const freed = [];
   const markers = [];
   class HighlightNode extends Node {
     set_size(width, height) { Object.assign(this, { width, height }); return this; }
     set_color(color) { this.color = color; return this; }
+    set_width(width) { this.width = width; return this; }
+    set_height(height) { this.height = height; return this; }
+    get_width() { return this.width; }
+    get_height() { return this.height; }
+    get_y() { return this.y ?? 0; }
+    set_sprites_from_key(key) { this.spriteKey = key; return this; }
+    set_align(x, y) { this.align = [x, y]; return this; }
+    add_text_label(label) { this.label = label; return this; }
+    add_hover_outline() { return this; }
+    add_to_pilot(pilot) { this.pilot = pilot; return this; }
+    set_tap_callback(callback, args) { this.tap = () => callback(...args); return this; }
+    set_think_callback(callback, args) { this.think = () => callback(...args); return this; }
+    is_unlocked() { return this.unlocked !== false; }
+  }
+  function reflow(text, width) {
+    const capacity = Math.max(1, Math.floor(width / 4));
+    return text.split('\n').flatMap(paragraph => {
+      const lines = [];
+      while (paragraph.length > capacity) {
+        const space = paragraph.lastIndexOf(' ', capacity);
+        const end = space > 0 ? space : capacity;
+        lines.push(paragraph.slice(0, end));
+        paragraph = paragraph.slice(end).trimStart();
+      }
+      lines.push(paragraph);
+      return lines;
+    }).join('\n');
   }
   Object.assign(h.context, {
     TextAlign: { Left: 0, Center: 1, Right: 2 },
@@ -1626,22 +1656,43 @@ test('gift highlight nodes sit behind native text, reuse layout, and refresh wit
     font_line_height: () => 12,
     string_width_font: text => text.length * 4,
     ANCHOR: {
+      reflow,
+      text_height: (text, width, font, lineHeight) => text === '' ? 0
+        : reflow(text, width).split('\n').length * lineHeight,
       positional: parent => {
         rootsCreated++;
-        return Object.assign(new Node(), {
+        return Object.assign(new HighlightNode(), {
           parent, x: 0, y: 0, max_alpha: 1, cache_x: 0, cache_y: 0, cache_alpha: 1,
           cache_is_dirty: false,
         });
       },
       nine_slice: (parent, z) => {
         const node = Object.assign(new HighlightNode(), { parent, z, cache_is_dirty: true });
-        parent.children.push(node);
+        if (parent) parent.children.push(node);
         markers.push(node);
         return node;
       },
       free_node: root => { root.freed = true; freed.push(root); },
     },
   });
+  const makeBody = text => Object.assign(new Node(), {
+    text, display_text: text, width: 120, z: -10, text_align: 0,
+    cache_x: 400, cache_y: 250, cache_alpha: 1, max_alpha: 1, cache_is_dirty: false,
+    get_font: () => 'standard', get_line_height: () => 13,
+    get_text() { return this.text; },
+    get_alpha() { return this.alpha; },
+    is_unlocked() { return this.unlocked !== false; },
+    prevent_spillover(value) { this.disallow_spillover = value; return this; },
+    disallow_spillover: true, color: 'native-text', lut_info: { enabled: false },
+  });
+  return { freed, markers, makeBody, get rootsCreated() { return rootsCreated; } };
+}
+
+test('gift highlight nodes sit behind native text, reuse layout, and refresh without leaving old nodes', () => {
+  const h = giftTooltipHarness();
+  h.npcs[2].gifts_given.add(0);
+  const renderer = highlightRendererHarness(h);
+  const { freed, markers } = renderer;
   const body = Object.assign(new Node(), {
     display_text: h.describe(''), width: 120, z: -10, text_align: 0,
     cache_x: 400, cache_y: 250, cache_alpha: 0.6, max_alpha: 1, cache_is_dirty: false,
@@ -1674,7 +1725,7 @@ test('gift highlight nodes sit behind native text, reuse layout, and refresh wit
     'a highlight added after the shop tooltip is laid out must use its screen position, not (0, 0)');
   assert.equal(marker.cache_alpha, 0.27, 'inherit the tooltip fade instead of starting fully visible');
   update();
-  assert.equal(rootsCreated, 1, 'unchanged hover does not allocate nodes every frame');
+  assert.equal(renderer.rootsCreated, 1, 'unchanged hover does not allocate nodes every frame');
 
   h.npcs[2].gifts_given.clear();
   update();
@@ -1728,6 +1779,362 @@ test('highlight updates visit visible item tooltips only and preserve native tex
   assert.equal(updates[0].node, body);
   assert.equal(updates[0].details.loved, 'March, Olric');
   assert.equal(body.text, before);
+});
+
+function cookingHighlightHarness() {
+  const h = giftTooltipHarness();
+  const renderer = highlightRendererHarness(h);
+  h.context.font_line_height = () => 13;
+  h.context.global.__item_data.push({ recipe_key: 'second_dish' });
+  h.context.global.__npc_prototypes.push({
+    name: 'Unmet villager', loved_gifts: list([]), liked_gifts: list([]), banned_gift_tags: list([]),
+  });
+  h.npcs[0].prototype.loved_gifts = list([1]);
+  const anotherDish = { ...h.item, item_id: 1 };
+  const description = renderer.makeBody('');
+  description.parent = Object.assign(new Node(), {
+    width: 175, height: 39,
+    get_width() { return this.width; }, get_height() { return this.height; },
+  });
+  const menu = {
+    type: 'crafting', context: 'cooking', item: h.item, description,
+    quantity: 3, hide_requests: 0, close_requested: false, free_requested: false, bottom_pilot: {},
+  };
+  const open = [menu];
+  h.context.ANCHOR.open_menus = { count: () => open.length, get: index => open[index] };
+  h.context.ANCHOR.wrap_for_local = text => text;
+  const screen = { x: 480, y: 270 };
+  h.context.ANCHOR.get_true_size = () => screen;
+  let activePilot = menu.bottom_pilot;
+  h.context.ANCHOR.get_active_pilot = () => activePilot;
+  h.context.INPUT = { gp_right_stick: { y: 0 } };
+  h.context.Align = { RightOut: 'right-out', TopIn: 'top-in' };
+  h.context.COMMON_LUT = 1;
+  h.context.CommonLutIndex = { Dark: 1 };
+  h.context.__MistriaCompanion_fit_node = () => {};
+  h.context.__MistriaCompanion_name = prototype => prototype.name ?? 'Selected dish';
+  const popupNode = (width, height) => h.context.ANCHOR.nine_slice(undefined, -10).set_size(width, height);
+  function textNode(text, parent) {
+    return Object.assign(renderer.makeBody(text), {
+      parent, set_max_width(width) { this.maxWidth = width; return this; },
+      allow_line_breaks() { return this; },
+      measure() {
+        const width = this.maxWidth ?? parent.width - 8;
+        this.display_text = h.context.ANCHOR.reflow(this.text, width);
+        this.width = width;
+        this.height = this.display_text.split('\n').length * 13;
+        return { x: this.width, y: this.height };
+      },
+    });
+  }
+  h.context.ANCHOR.text = parent => textNode('', parent);
+  h.context.popup_creator = () => {
+    const popup = { type: 'popup', backplate: popupNode(180, 0), pilot: {}, hide_requests: 0,
+      close_requested: false, free_requested: false };
+    popup.add_title = text => {
+      popup.title = text;
+      popup.header = popupNode(popup.backplate.width - 30, 17).set_xy(0, 8);
+    };
+    popup.refresh_backplate_height = () => {
+      popup.backplate.height = 50 + popup.header.height + popup.header.y + popup.body.height;
+    };
+    popup.add_description = text => {
+      popup.body = popupNode(popup.backplate.width - 20, 0);
+      popup.body_text = textNode(text, popup.body);
+      popup.body.height = popup.body_text.measure().y + 12;
+      popup.refresh_backplate_height();
+    };
+    popup.create_button = label => { popup.closeLabel = label; };
+    popup.spawn = () => {
+      open.push(popup);
+      activePilot = popup.pilot;
+      description.unlocked = false;
+    };
+    popup.close = () => {
+      popup.close_requested = true;
+      activePilot = menu.bottom_pilot;
+      description.unlocked = true;
+    };
+    return popup;
+  };
+  h.context.create_scroller = root => ({
+    new_element: height => popupNode(root.width, height),
+    add_height_to_element: (node, height) => { node.height += height; },
+    scroll_by_amount(amount) { this.scroll = (this.scroll ?? 0) + amount; },
+  });
+  function select(item, base = 'A finished dish.') {
+    menu.item = item;
+    description.enable();
+    description.text = h.context.MistriaCompanion_description(base, { item }) ?? base;
+    description.display_text = description.text;
+  }
+  const update = () => h.context.MistriaCompanion_update_gift_tooltips();
+  const state = () => description.board_get('mistria_item_details_cooking');
+  select(h.item);
+  const show = () => h.context.MistriaCompanion_show_cooking_gifts(menu);
+  return { ...h, renderer, description, menu, open, anotherDish, select, update, state, show, screen };
+}
+
+test('cooking preserves the native description and opens full highlighted gift details without ingredients', () => {
+  const h = cookingHighlightHarness();
+  h.npcs[2].gifts_given.add(0);
+  h.npcs[0].known_gift_preferences.add(0);
+  h.select(h.item);
+  const text = h.description.text;
+  h.update();
+  const node = h.state().button;
+  assert.equal(node.parent, h.description.parent);
+  assert.equal(node.label, 'Gifts');
+  assert.equal(node.pilot, h.menu.bottom_pilot);
+  assert.deepEqual(node.align, ['right-out', 'top-in'], 'button sits outside the description instead of obscuring it');
+  assert.equal(h.description.alpha, 1);
+  assert.equal(h.description.text, 'A finished dish.', 'do not shorten, hide, or scale the native description');
+  assert.equal(h.state().source_text, text);
+  assert.equal(h.menu.quantity, 3, 'do not change cooking quantity');
+  assert.equal(h.context.ARI, undefined, 'no inventory or ingredient access is required');
+  assert.equal(h.npcs[0].gifts_given.size, 0);
+  h.update();
+  assert.equal(h.state().button, node, 'reuse the native button while the selection is unchanged');
+  node.tap();
+  const popup = h.menu.mistria_gift_popup;
+  assert.equal(popup.item, h.item);
+  assert.match(popup.body_text.text, /Liked by: Balor\nLoved by: March, Olric$/);
+  assert.doesNotMatch(popup.body_text.text, /Seridia|Wheedle/);
+  assert.equal(popup.closeLabel, 'misc_local/close');
+  h.update();
+  const highlight = popup.body_text.board_get('mistria_item_details_gift_highlights');
+  assert.equal(highlight.root.children.length, 1);
+  assert.equal(highlight.root.parent, popup.body_text, 'reuse native item-tooltip highlight rendering');
+  assert.ok(popup.backplate.height <= h.screen.y - 16);
+});
+
+test('cooking highlights follow live mouse/controller recipe selection, not ingredient tooltips', () => {
+  const h = cookingHighlightHarness();
+  h.npcs[2].gifts_given.add(0);
+  h.npcs[0].gifts_given.add(1);
+  h.update();
+  const oldNode = h.state().button;
+  // Both native mouse taps and controller selection call set_to_item with the new recipe.
+  h.select(h.anotherDish);
+  const ingredientBody = h.renderer.makeBody(h.context.MistriaCompanion_description('', { item: h.item }));
+  h.open.push({ is_tooltip: true, body_text: ingredientBody, item: h.item });
+  h.update();
+  assert.equal(h.state().button, oldNode);
+  assert.equal(oldNode.freed, undefined);
+  assert.equal(h.description.text, 'A finished dish.');
+  assert.equal(h.state().item, h.anotherDish);
+  const ingredient = ingredientBody.board_get('mistria_item_details_gift_highlights');
+  assert.equal(ingredient.root.children.length, 1, 'ingredient tooltip still has its own independent highlight');
+  h.show();
+  const popup = h.menu.mistria_gift_popup;
+  assert.equal(popup.item, h.anotherDish);
+  assert.match(popup.body_text.text, /Loved by: Balor$/);
+  h.update();
+  assert.equal(popup.body_text.board_get('mistria_item_details_gift_highlights').root.children.length, 1);
+  popup.close();
+  h.select(h.item);
+  h.update();
+  assert.equal(h.menu.item, h.item);
+  h.show();
+  assert.equal(h.menu.mistria_gift_popup.item, h.item);
+});
+
+test('cooking recipe highlights clear on empty selection, hidden or closed panels, and non-cooking stations', () => {
+  for (const invalidate of [
+    h => { h.menu.item = undefined; }, // Native reset_right_page, including locked recipes.
+    h => { h.description.disable(); },
+    h => { h.description.marked_for_death = true; },
+    h => { h.menu.hide_requests = 1; },
+    h => { h.menu.close_requested = true; },
+    h => { h.menu.free_requested = true; },
+    h => { h.menu.context = 'blacksmithing'; },
+    h => { h.menu.context = undefined; },
+    h => { h.menu.item = { ...h.item, item_id: 999 }; },
+  ]) {
+    const h = cookingHighlightHarness();
+    h.npcs[2].gifts_given.add(0);
+    h.update();
+    const root = h.state().button;
+    invalidate(h);
+    h.update();
+    assert.equal(root.enabled, false);
+    const fading = h.menu.hide_requests > 0 || h.menu.close_requested || h.menu.free_requested
+      || h.description.marked_for_death;
+    if (fading) {
+      assert.equal(h.description.text, 'A finished dish.', 'keep the original description throughout the closing fade');
+      assert.equal(h.state().button, root);
+    } else {
+      assert.equal(h.state(), undefined, 'clear the cached signature along with the old root');
+      assert.equal(root.freed, true);
+      assert.equal(h.description.alpha, 1);
+      assert.equal(h.description.disallow_spillover, true);
+    }
+    h.update();
+    assert.equal(h.renderer.freed.length, fading ? 0 : 1, 'do not free the same overlay twice');
+    Object.assign(h.menu, { context: 'cooking', item: h.item, hide_requests: 0,
+      close_requested: false, free_requested: false });
+    h.description.marked_for_death = false;
+    h.description.enable();
+    h.update();
+    assert.equal(h.state().button.enabled, true);
+    if (!fading) assert.notEqual(h.state().button, root);
+  }
+});
+
+test('cooking updater ignores uninitialized or freed descriptions and unrelated recipe panels', () => {
+  const h = cookingHighlightHarness();
+  for (const [key, value] of [
+    ['description', undefined], ['description', { freed: true }],
+    ['type', 'journal'], ['context', 'woodcrafting'],
+  ]) {
+    const before = h.menu[key];
+    h.menu[key] = value;
+    h.update();
+    assert.equal(h.renderer.rootsCreated, 0);
+    h.menu[key] = before;
+  }
+  h.context.__MistriaCompanion_clear_gift_highlights(undefined);
+  h.context.__MistriaCompanion_clear_gift_highlights({ freed: true });
+});
+
+test('cooking gift highlights stay item-specific and refresh after history, infusion, and localized text changes', () => {
+  const h = cookingHighlightHarness();
+  h.npcs[2].gifts_given.add(1);
+  h.update();
+  h.show();
+  h.update();
+  assert.equal(h.menu.mistria_gift_popup.body_text.board_get('mistria_item_details_gift_highlights').root.children.length,
+    0, 'giving a different dish does not mark this recipe');
+  h.menu.mistria_gift_popup.close();
+  h.npcs[2].gifts_given.add(0);
+  h.update();
+  h.show();
+  h.update();
+  assert.equal(h.menu.mistria_gift_popup.body_text.board_get('mistria_item_details_gift_highlights').root.children.length, 1);
+  h.menu.mistria_gift_popup.close();
+  h.item.infusion = h.Infusion.Loveable;
+  h.npcs[0].gifts_given.add(0);
+  h.npcs[2].prototype.name = '名 前';
+  h.select(h.item, 'Localized dish description.');
+  h.description.display_text = 'Localized dish description.\nLoved by: Balor, March, 名\n前';
+  h.update();
+  h.show();
+  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'This dish is liked or loved by everyone.');
+  h.menu.mistria_gift_popup.close();
+  assert.doesNotMatch(h.description.text, /Seridia|Wheedle/);
+  const gifts = h.npcs.map(npc => Array.from(npc.gifts_given));
+  h.menu.quantity = 5;
+  h.select(h.item);
+  h.update();
+  assert.deepEqual(h.npcs.map(npc => Array.from(npc.gifts_given)), gifts,
+    'refreshing the cooking preview never records gifts');
+  h.context.MistriaCompanion_reset_save({});
+  h.npcs[0].gifts_given.clear();
+  h.npcs[2].gifts_given.clear();
+  h.select(h.item);
+  h.update();
+  h.item.infusion = 0;
+  h.select(h.item);
+  h.update();
+  h.show();
+  h.update();
+  assert.equal(h.menu.mistria_gift_popup.body_text.board_get('mistria_item_details_gift_highlights').root.children.length,
+    0, 'use gift history from the current save');
+});
+
+test('native cooking gift popup preserves full dish descriptions and all long gift names', () => {
+  const h = cookingHighlightHarness();
+  const threeLines = 'A complete dish description.\nA second descriptive line.\nA third descriptive line.';
+  const longName = 'A long localized villager name '.repeat(30).trim();
+  h.npcs[2].prototype.name = longName;
+  h.select(h.item, threeLines);
+  h.update();
+  assert.equal(h.description.text, threeLines, 'leave description rendering to the game with no truncation');
+  assert.equal(h.description.alpha, 1);
+  h.show();
+  const popup = h.menu.mistria_gift_popup;
+  assert.ok(popup.body_text.text.includes(longName), 'a long gift name is not ellipsized or discarded');
+  assert.ok(popup.mistria_gift_scroller);
+  assert.ok(popup.backplate.height <= h.screen.y - 16);
+  h.context.INPUT.gp_right_stick.y = 0.5;
+  h.context.MistriaCompanion_cooking_gift_scroll(popup);
+  assert.equal(popup.mistria_gift_scroller.scroll, 2);
+  popup.close();
+  h.context.MistriaCompanion_cooking_gift_scroll(popup);
+  assert.equal(popup.mistria_gift_scroller.scroll, 2);
+});
+
+test('universal gift suppression checks all eligible NPCs, not only met NPCs, and preserves dish description', () => {
+  const h = cookingHighlightHarness();
+  const universal = h.context.__MistriaCompanion_universal_gift;
+  assert.equal(universal(h.item), false, 'all met villagers like this but an unmet villager does not');
+  h.update();
+  assert.match(h.context.__MistriaCompanion_cooking_gift_text(h.item, h.details()), /Liked by:|Loved by:/);
+  const baseline = h.context.global.__npc_prototypes;
+  h.context.global.__npc_prototypes = baseline.slice(0, -1);
+  assert.equal(universal(h.item), true, 'mixed liked/loved counts when everybody eligible has a positive preference');
+  h.select(h.item, 'Everybody likes this dish.');
+  h.update();
+  assert.equal(h.description.text, 'Everybody likes this dish.');
+  h.show();
+  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'This dish is liked or loved by everyone.');
+  h.context.global.__npc_prototypes = baseline;
+  for (const infusion of [h.Infusion.Likeable, h.Infusion.Loveable]) {
+    h.item.infusion = infusion;
+    assert.equal(universal(h.item), true);
+  }
+  h.item.item_id = 100; // Void Newt exceptions still take precedence over universal infusions.
+  assert.equal(universal(h.item), false);
+  h.item.prototype.giftable = false;
+  assert.equal(universal(h.item), false, 'no eligible recipients is not everyone');
+  h.context.global.__npc_prototypes = [];
+  assert.equal(universal(h.item), false);
+});
+
+test('cooking strips only the exact companion suffix, never words from the original description', () => {
+  const h = cookingHighlightHarness();
+  const details = h.details();
+  details.recipes = 'Soup';
+  const extra = h.context.__MistriaCompanion_details_text(details);
+  const strip = h.context.__MistriaCompanion_cooking_base_text;
+  assert.equal(strip(`Loved by: is part of this description.\n${extra}`, details),
+    'Loved by: is part of this description.');
+  assert.equal(strip(extra, details), '');
+  const warnings = [];
+  h.context.mmapi_warn_rate_limited = (...args) => warnings.push(args);
+  assert.equal(strip('Another mod rewrote this text.', details), 'Another mod rewrote this text.');
+  assert.equal(warnings.length, 1);
+});
+
+test('cooking popup uses native UI only and prevents duplicate or stale activations', () => {
+  const h = cookingHighlightHarness();
+  h.update();
+  h.show();
+  const popup = h.menu.mistria_gift_popup;
+  h.show();
+  assert.equal(h.open.length, 2, 'do not stack another popup while the first is active');
+  popup.close();
+  h.menu.item = undefined;
+  h.show();
+  assert.equal(h.open.length, 2, 'an old callback cannot open details for a cleared recipe');
+  h.menu.item = h.item;
+  h.menu.hide_requests = 1;
+  h.show();
+  assert.equal(h.open.length, 2);
+  assert.doesNotMatch(source, /\b(?:gpu_\w+|draw_camera_\w+|draw_text_with_color|draw_get_\w+)\s*\(/);
+  assert.doesNotMatch(source, /ANCHOR\.custom\s*\(/, 'the failed custom cooking renderer is removed entirely');
+});
+
+test('cooking popup explains when no met villagers like the selected dish and does not mark gifts given', () => {
+  const h = cookingHighlightHarness();
+  h.item.prototype.giftable = false;
+  h.select(h.item);
+  h.update();
+  const before = h.npcs.map(npc => Array.from(npc.gifts_given));
+  h.show();
+  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'No met villagers like or love this dish.');
+  assert.deepEqual(h.npcs.map(npc => Array.from(npc.gifts_given)), before);
+  assert.equal(h.menu.quantity, 3);
 });
 
 function museumHarness(wing = 0) {
