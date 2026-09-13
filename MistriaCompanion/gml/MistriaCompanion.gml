@@ -2401,17 +2401,8 @@ function __MistriaCompanion_for_item(_item) {
     };
 }
 
-function MistriaCompanion_description(_value, _ctx) {
-    if (_value == undefined || _ctx == undefined) return undefined;
-    var _item = __MistriaCompanion_field(_ctx, "item");
-    var _item_id = __MistriaCompanion_field(_item, "item_id");
-    if (_item_id == undefined) return undefined;
-
-    var _details = __MistriaCompanion_for_item(_item);
-    if (_details == undefined) return undefined;
-    if (_details.recipes == "" && _details.liked == "" && _details.loved == "") return undefined;
-
-    var _result = _value;
+function __MistriaCompanion_details_text(_details) {
+    var _result = "";
     if (_details.recipes != "") {
         if (_result != "") _result += "\n";
         _result += "Uses: " + _details.recipes;
@@ -2425,6 +2416,19 @@ function MistriaCompanion_description(_value, _ctx) {
         _result += "Loved by: " + _details.loved;
     }
     return _result;
+}
+
+function MistriaCompanion_description(_value, _ctx) {
+    if (_value == undefined || _ctx == undefined) return undefined;
+    var _item = __MistriaCompanion_field(_ctx, "item");
+    var _item_id = __MistriaCompanion_field(_item, "item_id");
+    if (_item_id == undefined) return undefined;
+
+    var _details = __MistriaCompanion_for_item(_item);
+    if (_details == undefined) return undefined;
+    var _extra = __MistriaCompanion_details_text(_details);
+    if (_extra == "") return undefined;
+    return _value + (_value == "" ? "" : "\n") + _extra;
 }
 
 function __MistriaCompanion_compact_gift_text(_text) {
@@ -2489,6 +2493,139 @@ function __MistriaCompanion_gift_highlight_runs(_display_text, _details) {
     return _runs;
 }
 
+function __MistriaCompanion_clear_gift_highlights(_body) {
+    if (_body == undefined || _body.freed) return;
+    var _state = _body.board_get("mistria_item_details_gift_highlights");
+    if (_state == undefined) return;
+    if (!_state.root.freed) {
+        _state.root.disable();
+        ANCHOR.free_node(_state.root);
+    }
+    _body.board_set("mistria_item_details_gift_highlights", undefined);
+}
+
+function __MistriaCompanion_universal_gift(_item) {
+    var _npcs = __MistriaCompanion_as_array(global[$ "__npc_prototypes"]);
+    var _eligible = 0;
+    for (var _index = 0; _index < array_length(_npcs); _index++) {
+        if (_npcs[_index] == undefined) continue;
+        var _desire = __MistriaCompanion_gift_desire_for_npc(_item, _npcs[_index], _index);
+        if (_desire == undefined) continue;
+        if (_desire != Desire.Liked && _desire != Desire.Loved) return false;
+        _eligible++;
+    }
+    return _eligible > 0;
+}
+
+function __MistriaCompanion_cooking_base_text(_text, _details) {
+    var _extra = __MistriaCompanion_details_text(_details);
+    if (_extra == "") return _text;
+    if (_text == _extra) return "";
+    var _suffix = "\n" + _extra;
+    var _length = string_length(_text) - string_length(_suffix);
+    if (_length >= 0 && string_copy(_text, _length + 1, string_length(_suffix)) == _suffix) {
+        return string_copy(_text, 1, _length);
+    }
+    mmapi_warn_rate_limited("mistria_item_details:cooking_description", "mistria_item_details",
+        "Cooking description changed outside the companion; preserving it as the description preview.");
+    return _text;
+}
+
+function __MistriaCompanion_cooking_gift_text(_item, _details) {
+    if (__MistriaCompanion_universal_gift(_item)) return "This dish is liked or loved by everyone.";
+    var _gifts = __MistriaCompanion_details_text({ recipes: "", liked: _details.liked, loved: _details.loved });
+    if (_gifts == "") return "No met villagers like or love this dish.";
+    return "Highlighted names have already received this dish.\n\n" + _gifts;
+}
+
+function MistriaCompanion_cooking_gift_scroll(_popup) {
+    if (_popup.close_requested || _popup.free_requested || _popup.hide_requests > 0) return;
+    if (ANCHOR.get_active_pilot() == _popup.pilot && INPUT.gp_right_stick.y != 0) {
+        _popup.mistria_gift_scroller.scroll_by_amount(INPUT.gp_right_stick.y * 4);
+    }
+}
+
+function MistriaCompanion_show_cooking_gifts(_menu) {
+    if (_menu.close_requested || _menu.free_requested || _menu.hide_requests > 0
+        || _menu.context != RecipeContext.Cooking || _menu.item == undefined
+        || !_menu.description.get_enabled() || !_menu.description.is_unlocked()) return;
+    var _existing = __MistriaCompanion_field(_menu, "mistria_gift_popup");
+    if (_existing != undefined && !_existing.close_requested && !_existing.free_requested) return;
+    var _item = _menu.item;
+    var _details = __MistriaCompanion_for_item(_item);
+    if (_details == undefined) return;
+    var _screen = ANCHOR.get_true_size();
+    var _popup = popup_creator(undefined, undefined);
+    _popup.backplate.set_width(min(300, _screen.x - 20));
+    _popup.add_title(ANCHOR.wrap_for_local(__MistriaCompanion_name(_item.prototype) + " - Gift details"));
+    _popup.add_description(ANCHOR.wrap_for_local(__MistriaCompanion_cooking_gift_text(_item, _details)));
+    _popup.item = _item;
+    _popup.mistria_cooking_gift_popup = true;
+    _popup.create_button("misc_local/close");
+    if (_popup.backplate.get_height() > _screen.y - 16) {
+        var _text = _popup.body_text.get_text();
+        var _height = max(26, _screen.y - 16 - 50 - _popup.header.get_height() - _popup.header.get_y());
+        _popup.body_text.disable();
+        ANCHOR.free_node(_popup.body_text);
+        _popup.body.set_height(_height);
+        var _root = ANCHOR.positional(_popup.body)
+            .set_xy(4, 4).set_size(_popup.body.get_width() - 8, _height - 8);
+        var _scroller = create_scroller(_root);
+        _popup.mistria_gift_scroller = _scroller;
+        var _element = _scroller.new_element(16);
+        _popup.body_text = ANCHOR.text(_element)
+            .set_xy(3, 1).set_max_width(_root.get_width() - 12)
+            .allow_line_breaks().set_lut(COMMON_LUT).set_text(_text);
+        _scroller.add_height_to_element(_element, max(0, _popup.body_text.measure().y + 2 - 16));
+        _root.set_think_callback(MistriaCompanion_cooking_gift_scroll, [_popup]);
+        _popup.refresh_backplate_height();
+    }
+    _menu.mistria_gift_popup = _popup;
+    _popup.spawn();
+}
+
+function __MistriaCompanion_clear_cooking_details(_body, _restore=true) {
+    if (_body == undefined || _body.freed) return;
+    var _state = _body.board_get("mistria_item_details_cooking");
+    if (_state == undefined) return;
+    if (!_state.button.freed) {
+        _state.button.disable();
+        if (!_restore) return;
+        ANCHOR.free_node(_state.button);
+    }
+    if (_body.get_text() == _state.base_text) {
+        _body.set_text(_state.source_text);
+    }
+    _body.board_set("mistria_item_details_cooking", undefined);
+}
+
+function __MistriaCompanion_update_cooking_details(_menu, _details) {
+    var _body = _menu.description;
+    __MistriaCompanion_clear_gift_highlights(_body);
+    var _state = _body.board_get("mistria_item_details_cooking");
+    if (_state == undefined) {
+        _state = {
+            source_text: undefined, base_text: undefined, item: undefined
+        };
+        _state.button = ANCHOR.nine_slice(_body.parent)
+            .set_sprites_from_key("spr_ui_button")
+            .set_size(40, 18).set_align(Align.RightOut, Align.TopIn).set_xy(4, 0)
+            .add_text_label(ANCHOR.wrap_for_local("Gifts"), COMMON_LUT, CommonLutIndex.Dark)
+            .add_hover_outline().add_to_pilot(_menu.bottom_pilot)
+            .set_tap_callback(MistriaCompanion_show_cooking_gifts, [_menu]);
+        _body.board_set("mistria_item_details_cooking", _state);
+    }
+    var _text = _body.get_text();
+    if (_state.item != _menu.item || _text != _state.base_text) {
+        _state.source_text = _text;
+        _state.base_text = __MistriaCompanion_cooking_base_text(_text, _details);
+        _body.set_text(_state.base_text);
+    }
+    _state.item = _menu.item;
+    _state.button.enable();
+    __MistriaCompanion_fit_node(_state.button);
+}
+
 function __MistriaCompanion_update_gift_highlights(_body, _details) {
     _body.measure();
     var _font = _body.get_font();
@@ -2506,10 +2643,7 @@ function __MistriaCompanion_update_gift_highlights(_body, _details) {
     }
     var _state = _body.board_get("mistria_item_details_gift_highlights");
     if (_state != undefined && _state.signature == _signature) return;
-    if (_state != undefined) {
-        _state.root.disable();
-        ANCHOR.free_node(_state.root);
-    }
+    __MistriaCompanion_clear_gift_highlights(_body);
 
     var _root = ANCHOR.positional(_body);
     // Late-added positional nodes otherwise keep the default screen origin and alpha.
@@ -2536,13 +2670,42 @@ function __MistriaCompanion_update_gift_highlights(_body, _details) {
 function MistriaCompanion_update_gift_tooltips() {
     for (var _index = 0; _index < ANCHOR.open_menus.count(); _index++) {
         var _menu = ANCHOR.open_menus.get(_index);
-        if (_menu.close_requested || _menu.free_requested || _menu.hide_requests > 0) continue;
-        if (__MistriaCompanion_field(_menu, "is_tooltip") != true) continue;
-        var _body = __MistriaCompanion_field(_menu, "body_text");
+        var _body;
+        var _gift_popup = __MistriaCompanion_field(_menu, "mistria_cooking_gift_popup") == true;
+        if (__MistriaCompanion_field(_menu, "is_tooltip") == true || _gift_popup) {
+            _body = __MistriaCompanion_field(_menu, "body_text");
+        } else if (__MistriaCompanion_field(_menu, "type") == Menu.Crafting) {
+            _body = __MistriaCompanion_field(_menu, "description");
+            if (__MistriaCompanion_field(_menu, "context") != RecipeContext.Cooking) {
+                __MistriaCompanion_clear_gift_highlights(_body);
+                __MistriaCompanion_clear_cooking_details(_body);
+                continue;
+            }
+        } else {
+            continue;
+        }
+        if (_body == undefined || _body.freed) continue;
         var _item = __MistriaCompanion_field(_menu, "item");
-        if (_body == undefined || _body.freed || _item == undefined) continue;
+        if (_menu.close_requested || _menu.free_requested || _menu.hide_requests > 0
+            || _body.marked_for_death || !_body.get_enabled() || _item == undefined)
+        {
+            __MistriaCompanion_clear_gift_highlights(_body);
+            __MistriaCompanion_clear_cooking_details(_body,
+                !_menu.close_requested && !_menu.free_requested && _menu.hide_requests <= 0
+                && !_body.marked_for_death);
+            continue;
+        }
         var _details = __MistriaCompanion_for_item(_item);
-        if (_details != undefined) __MistriaCompanion_update_gift_highlights(_body, _details);
+        if (_details != undefined) {
+            if (__MistriaCompanion_field(_menu, "is_tooltip") == true || _gift_popup) {
+                __MistriaCompanion_update_gift_highlights(_body, _details);
+            } else {
+                __MistriaCompanion_update_cooking_details(_menu, _details);
+            }
+        } else {
+            __MistriaCompanion_clear_gift_highlights(_body);
+            __MistriaCompanion_clear_cooking_details(_body);
+        }
     }
 }
 
@@ -2626,5 +2789,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.43");
+mmapi_mod_declare("mistria_item_details", "1.0.44");
 MistriaCompanion_register();

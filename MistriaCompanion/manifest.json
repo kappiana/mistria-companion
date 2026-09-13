@@ -1,7 +1,7 @@
 {
   "name": "Mistria Companion",
   "author": "kappiana",
-  "version": "1.0.43",
+  "version": "1.0.44",
   "description": "Adds item details, wiki shortcuts, HUD information, spawn alerts, map helpers, clock controls, mounted conversations, gifting and gossip, and hold-to-repeat Seed Maker use.",
   "minInstallerVersion": "0.15.5",
   "manifestVersion": 1,

@@ -6,6 +6,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 
 - Shows compact cooking or crafting recipe summaries for a hovered item.
 - Lists met villagers who like or love the actual hovered item, including its infusion and special-item gift rules, and highlights names when you have already given them that item.
+- Adds a cooking-station Gifts button with full liked/loved lists and gift-history highlights for the selected dish.
 - Adds a chest button that grabs one loved gift for each met villager who has not received a gift that day, prioritizing birthdays and available backpack space.
 - Repeats Seed Maker conversions while Interact is held, using the selected stack and normal seed yields.
 - Allows ordinary villager conversations, gifting, and Elsie's Gossip while riding your mount, using the normal controls.
@@ -119,6 +120,22 @@ same item share a highlight, while the liked/loved lists still reflect the hover
 variant. Meeting a villager or giving a gift is reflected the next time you hover
 the item. Highlights follow the tooltip's position and fade, including in shops.
 No extra save data or configuration is needed.
+
+At a **cooking station**, select a dish and use the **Gifts** button beside its
+description to open **Gift details**. The popup shows the full liked/loved lists
+with the same highlights, while the dish's original description stays in its
+box at its normal size. Only met, unlocked villagers appear. Use the mouse or
+controller to select the button, and **Close** or the normal menu-back control
+to return to cooking. Unusually long lists scroll with the mouse wheel or right
+stick instead of losing names.
+
+The popup describes the selected finished dish, not its ingredients. It does
+not require owning the dish or having enough ingredients, and cooking a dish
+does not count as giving it as a gift. It does not predict random infusions
+that might be applied during cooking. For dishes liked or loved by every
+eligible villager, the popup shows a short summary instead of a redundant list.
+This checks all villagers, not just those you have met. Ordinary item tooltips
+are unchanged.
 
 ### Holding Interact at the Seed Maker
 
