@@ -1279,7 +1279,7 @@ test('saving preferences preserves current bindings and mounted configuration an
   assert.equal(preferenceSessionHarness(store).runtime.all_bug_markers_enabled, true);
 });
 
-test('automatic rare alerts stay off while observations are still recorded', () => {
+test('legendary fish tracking returns new observations without emitting separate notices', () => {
   const runtime = { notifications_enabled: false, legendary_day: '1', legendary_sightings: [],
     seen_spawns: {} };
   const messages = [];
@@ -1295,51 +1295,90 @@ test('automatic rare alerts stay off while observations are still recorded', () 
     CURRENT_LOCATION_ID: 1,
     global: { __item_data: [{ name: 'Legendary Fish' }, { name: 'Rare Bug' }] },
   });
-  context.__MistriaCompanion_track_legendary('Legendary Fish', 0);
-  context.__MistriaCompanion_track_legendary('Very Rare Bug', 1);
+  assert.equal(context.__MistriaCompanion_track_legendary('Legendary Fish', 0), true);
+  assert.equal(context.__MistriaCompanion_track_legendary('Legendary Fish', 0), false);
   assert.equal(messages.length, 0);
-  assert.equal(runtime.legendary_sightings.length, 2);
+  assert.equal(runtime.legendary_sightings.length, 1);
   runtime.notifications_enabled = true;
   runtime.seen_spawns = {};
-  runtime.legendary_sightings = [];
-  context.__MistriaCompanion_track_legendary('Very Rare Bug', 1);
-  assert.equal(messages.length, 1);
-  assert.match(messages.at(-1), /Very Rare Bug: Rare Bug/);
+  assert.equal(context.__MistriaCompanion_track_legendary('Legendary Fish', 0), false,
+    'a repeat visit cannot repeat a fish alert from this location on the same day');
+  assert.equal(messages.length, 0, 'the combined sighting renderer owns automatic notifications');
 });
 
 function localSightingsHarness(priorCatches = []) {
   const runtime = { notifications_enabled: false, all_bug_markers_enabled: false, legendary_day: '1',
     legendary_sightings: ['Very Rare Bug: Snowball Beetle - Western Ruins'], seen_spawns: {} };
-  const state = { day: 1, room: 'town', ready: true, paused: false, cutscene: false };
+  const state = { day: 1, room: 'town', ready: true, paused: false, cutscene: false, screenHeight: 270,
+    traveling: false };
   const actors = { bug: [], fish: [], school: [] };
   const notices = [];
   const toasts = [];
+  const nativeToasts = [];
   const feedback = [];
   const warnings = [];
   const keys = ['butterfly', 'snowball_beetle', 'moth', 'legendary_fish', 'common_fish'];
   const items = ['Butterfly', 'Snowball Beetle', 'Moth', 'Legendary Fish', 'Common Fish'].map(name => ({ name }));
   const bugData = [{ rarity: 'common' }, { rarity: 'very_rare' }, { rarity: 'rare' }];
-  const toastMenu = {
-    hide_requests: 0, canvas: { get_enabled: () => true },
-    toasts: { is_empty: () => toasts.length === 0, last: () => toasts.at(-1) },
-    create_notification(text, duck) {
-      notices.push({ text, duck });
-      toasts.push({
-        freed: false, alpha: 1,
-        set_alpha(value) { this.alpha = value; return this; },
+  function node(parent, isText = false) {
+    const board = new Map();
+    return {
+        parent, freed: false, marked_for_death: false, alpha: 1, enabled: true,
+        x: 0, y: 0, width: 0, height: 0, text: '', display_text: '',
+        set_xy(x, y) { this.x = x; this.y = y; return this; },
+        set_x(x) { this.x = x; return this; },
+        set_y(y) { this.y = y; return this; },
+        set_width(width) { this.width = width; return this; },
+        set_height(height) { this.height = height; return this; },
+        set_sprite(sprite) { this.sprite = sprite; return this; },
+        set_align() { return this; }, set_max_width() { return this; },
+        set_lut() { return this; }, allow_line_breaks() { return this; },
+        get_x() { return this.x; }, get_y() { return this.y; },
+        get_height() { return this.height; }, get_width() { return this.width; },
+        get_alpha() { return this.alpha; }, get_enabled() { return this.enabled; },
+        set_alpha(alpha) { this.alpha = alpha; return this; },
+        disable() { this.enabled = false; return this; },
+        get_font: () => 'standard', get_line_height: () => undefined,
+        measure() {
+          const lines = this.text.split('\n').flatMap(line => {
+            const wrapped = [];
+            // Simulate native fixed-width toast wrapping without changing the actual report.
+            while (line.length > 33) { wrapped.push(line.slice(0, 33)); line = line.slice(33); }
+            wrapped.push(line);
+            return wrapped;
+          });
+          this.display_text = lines.join('\n');
+          this.width = 132;
+          this.height = lines.length * 13;
+          return { x: this.width, y: this.height };
+        },
+        set_text(value) {
+          if (isText && !this.initialized) notices.push({ text: value });
+          this.initialized = true;
+          this.text = value; this.measure(); return this;
+        },
+        board_get: key => board.get(key),
+        board_set(key, value) { board.set(key, value); return this; },
         set_think_callback(callback, args) { this.think = () => callback(...args); return this; },
-      });
-      return true;
+    };
+  }
+  const toastMenu = {
+    hide_requests: 0, base_y: 70, canvas: node(),
+    toasts: {
+      is_empty: () => nativeToasts.length === 0, last: () => nativeToasts.at(-1),
+      count: () => nativeToasts.length, get: index => nativeToasts[index],
     },
+    create_notification: () => assert.fail('sightings must not enter or change the native FIFO queue'),
   };
   const context = load([
     'has_name', 'track_legendary', 'visit_legendary_fish', 'each_live_bug', 'each_live_legendary_fish',
-    'track_rare_bug', 'track_rare_fish', 'local_visit_key', 'add_local_species', 'update_local_sightings',
+    'local_visit_key', 'add_local_species', 'update_local_sightings', 'live_sightings',
     'collect_local_bug', 'collect_local_fish', 'local_species_rows', 'local_sightings_report',
-    'dig_spot_location_name',
+    'dig_spot_location_name', 'size_sightings_notice', 'create_sightings_notice',
+    'sightings_transition_active', 'retire_sightings_notice',
   ].map(privateName).concat([
     'show_local_sightings', 'replay_local_sightings', 'sightings_notice_think',
-    'reset_local_sightings', 'floor_built', 'reset_save', 'track_legendary_spawns',
+    'reset_local_sightings', 'floor_built', 'reset_save', 'track_local_spawns',
   ].map(publicName)), {
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_legendary_day_key: () => String(state.day),
@@ -1353,12 +1392,23 @@ function localSightingsHarness(priorCatches = []) {
     __MistriaCompanion_menu: () => toastMenu,
     game_paused: () => state.paused,
     Menu: { InfoToasts: 'toasts' },
-    ANCHOR: { wrap_for_local: value => value },
+    ANCHOR: {
+      wrap_for_local: value => value, get_true_size: () => ({ x: 480, y: state.screenHeight }),
+      nine_slice: parent => { const value = node(parent); toasts.push(value); return value; },
+      text: parent => node(parent, true), sprite: parent => node(parent),
+      free_node: value => { value.marked_for_death = true; value.freed = true; },
+    },
+    Align: { LeftIn: 'left', Middle: 'middle' }, COMMON_LUT: 0,
+    spr_ui_hud_quest_toast_box: 'toast-box', spr_ui_hud_quest_toast_icon: 'toast-icon',
+    sprite_get_width: () => 10,
+    string_split: (text, separator) => text.split(separator),
+    font_line_height: () => 13,
     global: { __item_data: items },
     GAME_STATS: { bugs_caught: structuredClone(priorCatches) },
     CURRENT_LOCATION_ID: 0, CURRENT_DYN_INDEX: 0,
     GRID: { is_setup: true, node_counter: 100 },
     DUNGEON_RUNNER: undefined,
+    TAXI: { is_traveling: () => state.traveling },
     BUGS: { get: id => bugData[id] }, FISH: {},
     obj_bug: 'bug', obj_fishy: 'fish', obj_fish_school: 'school',
     instance_number: kind => actors[kind].length,
@@ -1376,13 +1426,25 @@ function localSightingsHarness(priorCatches = []) {
     mmapi_warn_rate_limited: (...args) => warnings.push(args),
   });
   const sync = () => context.__MistriaCompanion_update_local_sightings();
-  const report = () => context.__MistriaCompanion_local_sightings_report()?.join('\n');
+  const report = () => context.__MistriaCompanion_local_sightings_report();
   const show = () => context.MistriaCompanion_show_local_sightings();
   const replay = () => context.MistriaCompanion_replay_local_sightings();
+  const track = () => context.MistriaCompanion_track_local_spawns();
+  function advance(frames = 13) {
+    for (let i = 0; i < frames; i++) {
+      track();
+      replay();
+    }
+  }
   function expire() {
     for (const toast of toasts) toast.freed = true;
     toasts.length = 0;
     replay();
+  }
+  function nativeNotice(height = 40, y = 70) {
+    const value = node(toastMenu.canvas).set_xy(0, y).set_width(180).set_height(height);
+    nativeToasts.push(value);
+    return value;
   }
   function bug(item_id) {
     const actor = { item_id, alive: true };
@@ -1395,7 +1457,7 @@ function localSightingsHarness(priorCatches = []) {
   }
   sync();
   return { context, runtime, state, actors, notices, toasts, toastMenu, expire, replay,
-    feedback, warnings, keys, items, sync, report, show, bug, catchBug };
+    feedback, warnings, keys, items, sync, report, show, bug, catchBug, track, advance, nativeToasts, nativeNotice };
 }
 
 test('F6 includes ordinary, rare, and very rare local bugs, even with map markers and alerts off', () => {
@@ -1406,14 +1468,14 @@ test('F6 includes ordinary, rare, and very rare local bugs, even with map marker
   h.bug(2);
   h.show();
   assert.equal(h.notices.length, 1);
-  assert.equal(h.notices[0].text, 'Town\nButterfly: 2 active, 0 caught');
+  assert.equal(h.notices[0].text,
+    'Butterfly: 2 active, 0 caught\nSnowball Beetle: 1 active, 0 caught\nMoth: 1 active, 0 caught');
+  assert.doesNotMatch(h.notices[0].text, /Town|^\n/, 'surface notices have no location heading or blank first line');
   h.show();
   h.replay();
   assert.equal(h.notices.length, 1, 'repeated F6 presses do not pile up notices');
   h.expire();
-  assert.equal(h.notices[1].text, 'Town\nSnowball Beetle: 1 active, 0 caught');
-  h.expire();
-  assert.equal(h.notices[2].text, 'Town\nMoth: 1 active, 0 caught');
+  assert.equal(h.notices.length, 1, 'no second or third notification after the first one expires');
   assert.doesNotMatch(h.notices.map(entry => entry.text).join('\n'), /Western Ruins/);
   assert.equal(h.runtime.notifications_enabled, false);
   assert.equal(h.runtime.all_bug_markers_enabled, false);
@@ -1421,6 +1483,118 @@ test('F6 includes ordinary, rare, and very rare local bugs, even with map marker
   assert.equal(h.state.paused, false, 'showing sightings must leave gameplay running');
   h.expire();
   assert.equal(h.runtime.sightings_replay, undefined);
+});
+
+test('F6 combines active and caught bugs and legendary fish in the same native notification', () => {
+  const h = localSightingsHarness();
+  h.context.CURRENT_LOCATION_ID = 2;
+  h.context.DUNGEON_RUNNER = { current_floor: 95, current_level: () => ({ impl: 'ruins' }) };
+  h.sync();
+  const first = h.bug(0);
+  h.catchBug(first);
+  h.bug(1);
+  h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
+  h.show();
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].text,
+    'The Mines Floor 96\nButterfly: 0 active, 1 caught\nSnowball Beetle: 1 active, 0 caught\n'
+    + 'Legendary fish - Legendary Fish: 1 active');
+  assert.equal(h.toasts.length, 1);
+  assert.equal(h.state.paused, false);
+  h.expire();
+  assert.equal(h.notices.length, 1);
+});
+
+test('sighting headings appear only in the mines for bug, fish-only, and empty reports', () => {
+  for (const inMines of [false, true]) {
+    for (const content of ['bugs', 'fish', 'empty']) {
+      const h = localSightingsHarness();
+      if (inMines) {
+        h.context.CURRENT_LOCATION_ID = 2;
+        h.context.DUNGEON_RUNNER = { current_floor: 95, current_level: () => ({ impl: 'ruins' }) };
+      } else {
+        h.context.CURRENT_LOCATION_ID = 1;
+      }
+      const heading = inMines ? 'The Mines Floor 96\n' : '';
+      let body = 'No active or caught bugs this visit. No legendary fish active here.';
+      if (content === 'bugs') {
+        h.bug(0);
+        body = 'Butterfly: 1 active, 0 caught';
+      } else if (content === 'fish') {
+        h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
+        body = 'Legendary fish - Legendary Fish: 1 active';
+      }
+      h.show();
+      assert.equal(h.notices[0].text, heading + body);
+      assert.doesNotMatch(h.notices[0].text, /^\n|\n\n|Western Ruins/);
+    }
+  }
+});
+
+test('oversized F6 reports stay in one on-screen toast and automatically cycle all lines', () => {
+  const h = localSightingsHarness();
+  h.state.screenHeight = 200;
+  for (let i = 0; i < 24; i++) {
+    const id = h.items.length;
+    h.items.push({ name: `Another long named bug species ${i}` });
+    h.keys.push(`bug_${i}`);
+    h.context.GAME_STATS.bugs_caught.push({ bug: `bug_${i}` });
+  }
+  h.context.BUGS.get = id => ({ rarity: id === 1 ? 'very_rare' : 'common' });
+  h.show();
+  assert.equal(h.notices.length, 1);
+  const toast = h.toasts[0];
+  const pages = toast.board_get('mistria_sightings_pages');
+  assert.ok(pages.end < pages.lines.length);
+  assert.equal(pages.lines.join('').replace(/\s/g, ''), h.notices[0].text.replace(/\s/g, ''),
+    'pagination never truncates a species name or count');
+  assert.ok(toast.height + h.toastMenu.base_y <= h.state.screenHeight - 8);
+  const displayed = [toast.board_get('text').text];
+  let frame = 0;
+  let previousStart = pages.start;
+  while (!toast.freed) {
+    toast.think();
+    frame++;
+    if (pages.start !== previousStart && pages.end > pages.start) {
+      displayed.push(toast.board_get('text').text);
+      previousStart = pages.start;
+      assert.ok(toast.board_get('timer') >= 239, 'every new page gets its own reading interval');
+    }
+    assert.ok(frame < 10000);
+    h.replay();
+  }
+  assert.equal(displayed.join('\n'), Array.from(pages.lines).join('\n'));
+  assert.equal(h.notices.length, 1, 'paging changes only native text, never spawns another toast');
+  assert.equal(h.state.paused, false);
+});
+
+test('sighting pages adapt around other notices without losing lines or consuming hidden reading time', () => {
+  const h = localSightingsHarness();
+  const contents = 'one\n\ntwo\nthree\nfour\nfive\nsix\nseven';
+  const toast = h.context.__MistriaCompanion_create_sightings_notice(contents, h.toastMenu);
+  toast.set_think_callback(h.context.MistriaCompanion_sightings_notice_think,
+    [toast, h.runtime.local_sightings, false]);
+  const pages = toast.board_get('mistria_sightings_pages');
+  const other = h.nativeNotice(110);
+  toast.think();
+  assert.equal(toast.y, other.y + other.height + 4);
+  assert.ok(toast.y + toast.height <= h.state.screenHeight - 8);
+  assert.equal(pages.start, 0);
+  const shortened = pages.end;
+  assert.ok(shortened < pages.lines.length);
+  other.set_height(220);
+  const remaining = pages.wait;
+  for (let i = 0; i < 100; i++) toast.think();
+  assert.equal(toast.alpha, 0);
+  assert.equal(pages.wait, remaining, 'no room means no lost reading time');
+  other.set_height(40);
+  toast.think();
+  assert.equal(toast.alpha, 1);
+  assert.ok(pages.end > shortened, 'use extra room when it becomes available');
+  assert.equal(pages.start, 0, 'resizing never skips a partially read page');
+  assert.equal(toast.board_get('text').text, contents);
+  assert.equal(h.nativeToasts[0], other);
+  assert.equal(other.freed, false);
 });
 
 test('local report retains actual catches, excludes uncaught despawns, and never accumulates active counts', () => {
@@ -1547,24 +1721,29 @@ test('F6 reports loading separately from an empty area and refreshes without ope
   assert.match(h.notices[1].text, /Moth: 1 active, 0 caught/);
 });
 
-test('F6 notices yield to existing toasts and never display over menus or cutscenes', () => {
+test('F6 notices coexist with native toasts and suspend while menus or cutscenes hide them', () => {
   const h = localSightingsHarness();
   h.bug(0);
-  const existing = { freed: false };
-  h.toasts.push(existing);
+  const existing = h.nativeNotice();
   h.show();
-  assert.equal(h.notices.length, 0, 'wait for the existing native notification instead of hiding it');
+  assert.equal(h.notices.length, 1, 'show below the existing notification without waiting for it');
+  const toast = h.toasts[0];
+  assert.ok(toast.y >= existing.y + existing.height);
+  const remaining = toast.board_get('timer');
   h.state.paused = true;
-  h.expire();
-  assert.equal(h.notices.length, 0);
+  for (let i = 0; i < 500; i++) toast.think();
+  assert.equal(toast.alpha, 0);
+  assert.equal(toast.board_get('timer'), remaining);
   h.state.paused = false;
   h.state.cutscene = true;
-  h.replay();
-  assert.equal(h.notices.length, 0);
+  toast.think();
+  assert.equal(toast.alpha, 0);
   h.state.cutscene = false;
-  h.replay();
+  toast.think();
   assert.equal(h.notices.length, 1);
-  const toast = h.toasts[0];
+  assert.equal(toast.alpha, 1);
+  assert.equal(h.nativeToasts[0], existing);
+  assert.equal(h.nativeToasts.length, 1, 'the companion has its own UI node, not a native queue entry');
   h.state.cutscene = true;
   toast.think();
   assert.equal(toast.alpha, 0);
@@ -1589,7 +1768,7 @@ test('leaving an area cancels pending F6 notices and hides a stale visible sight
   assert.equal(h.runtime.sightings_replay, undefined);
 });
 
-test('shared live scanners preserve automatic alerts for very rare bugs and legendary fish only', () => {
+test('automatic entry notice combines every bug rarity, counts, and legendary fish exactly like F6', () => {
   const h = localSightingsHarness();
   h.runtime.notifications_enabled = true;
   h.runtime.legendary_sightings = [];
@@ -1599,39 +1778,364 @@ test('shared live scanners preserve automatic alerts for very rare bugs and lege
   h.bug(2);
   h.actors.bug.push(undefined, { alive: false }, { alive: true });
   h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
-  h.context.MistriaCompanion_track_legendary_spawns();
-  assert.deepEqual(h.feedback, [
-    'Very Rare Bug: Snowball Beetle - Town', 'Legendary Fish: Legendary Fish - Town',
-  ]);
-  h.context.MistriaCompanion_track_legendary_spawns();
-  assert.equal(h.feedback.length, 2);
+  h.advance(12);
+  assert.equal(h.notices.length, 0, 'allow 12 clear frames for the area and spawns to settle');
+  h.advance(1);
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].text, h.report());
+  assert.equal(h.notices[0].text, 'Butterfly: 1 active, 0 caught\n'
+    + 'Snowball Beetle: 2 active, 0 caught\nMoth: 1 active, 0 caught\n'
+    + 'Legendary fish - Legendary Fish: 1 active');
+  assert.equal(h.runtime.sightings_replay.automatic, true);
+  assert.equal(h.state.paused, false);
+  assert.equal(h.feedback.length, 0, 'no separate rare-bug, fish, or mine notification');
+  h.show();
+  h.expire();
+  h.advance(30);
+  assert.equal(h.notices.length, 1, 'F6 and repeated scans do not duplicate the visible summary');
 });
 
-test('mine-floor summaries respect automatic-alert preference without delaying floor initialization', () => {
-  const runtime = { notifications_enabled: false, mine_bug_floor: '', mine_bug_delay: 0 };
-  const messages = [];
-  const runner = { current_floor: 1, current_level: () => ({ impl: 'caves' }) };
-  const context = load([privateName('name_index'), publicName('show_mine_bug_spawns')], {
-    __MistriaCompanion_runtime: () => runtime,
-    __MistriaCompanion_name: item => item.name,
-    DUNGEON_RUNNER: runner, GRID: { is_setup: true }, BUGS: {},
-    global: { __item_data: [{ name: 'Moth' }] },
-    obj_bug: 'bug', instance_number: () => 2, instance_find: () => ({ item_id: 0 }),
-    room: () => 'mines',
-    ANCHOR: { wrap_for_local: value => value },
-    create_notification: text => messages.push(text),
-  });
-  context.MistriaCompanion_show_mine_bug_spawns();
-  context.MistriaCompanion_show_mine_bug_spawns();
-  assert.equal(runtime.mine_bug_delay, -1);
-  assert.equal(messages.length, 0);
-  runtime.notifications_enabled = true;
-  context.MistriaCompanion_show_mine_bug_spawns();
-  assert.equal(messages.length, 0, 'enabling alerts does not replay an old floor summary');
+test('automatic sightings remain quiet by default and enabling alerts does not replay old observations', () => {
+  const h = localSightingsHarness();
+  h.bug(0);
+  h.bug(1);
+  h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
+  h.advance(30);
+  assert.equal(h.notices.length, 0);
+  h.runtime.notifications_enabled = true;
+  h.advance(30);
+  assert.equal(h.notices.length, 0);
+  h.bug(2);
+  h.advance();
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].text, 'Moth: 1 active, 0 caught',
+    'enabling alerts mid-visit permits new-species updates, not a replay of the entry list');
+});
+
+test('automatic bug summaries repeat for new species, not catches, duplicates, or grid node changes', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  const first = h.bug(0);
+  h.advance();
+  h.expire();
+  h.catchBug(first);
+  h.bug(0);
+  h.context.GRID.node_counter++;
+  h.advance(30);
+  assert.equal(h.notices.length, 1);
+  h.bug(2);
+  h.advance();
+  assert.equal(h.notices.length, 2);
+  assert.equal(h.notices[1].text, 'Moth: 1 active, 0 caught');
+  h.expire();
+  h.show();
+  assert.equal(h.notices[2].text, 'Butterfly: 1 active, 1 caught\nMoth: 1 active, 0 caught',
+    'only F6 requests the full list again during the visit');
+});
+
+test('mine-floor bug notices use the combined renderer and include species revealed later', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.context.CURRENT_LOCATION_ID = 2;
+  const runner = { current_floor: 95, current_level: () => ({ impl: 'ruins' }) };
+  h.context.DUNGEON_RUNNER = runner;
+  h.bug(0);
+  h.bug(0);
+  h.advance();
+  assert.equal(h.notices[0].text, 'The Mines Floor 96\nButterfly: 2 active, 0 caught');
+  h.expire();
+  h.bug(2);
+  h.context.GRID.node_counter++;
+  h.advance();
+  assert.equal(h.notices.length, 2, 'a new species revealed from a rock triggers a small update');
+  assert.equal(h.notices[1].text, 'Moth: 1 active, 0 caught',
+    'follow-ups omit the old species and even the mine heading to stay compact');
+  h.expire();
   runner.current_floor++;
-  context.MistriaCompanion_show_mine_bug_spawns();
-  context.MistriaCompanion_show_mine_bug_spawns();
-  assert.deepEqual(messages, ['Mine bugs: Moth x2']);
+  h.advance();
+  assert.equal(h.notices.length, 3);
+  assert.match(h.notices[2].text, /^The Mines Floor 97\n/);
+  assert.doesNotMatch(source, /Mine bugs:|function MistriaCompanion_show_mine_bug_spawns/);
+});
+
+test('automatic entry detection resets on every visit boundary and save load', () => {
+  for (const change of [
+    h => { h.context.CURRENT_LOCATION_ID = 1; },
+    h => { h.context.CURRENT_DYN_INDEX++; },
+    h => { h.state.room = 'another room'; },
+    h => { h.state.day++; },
+    h => { h.context.GRID = { is_setup: true }; },
+    h => h.context.MistriaCompanion_reset_local_sightings({}),
+    h => h.context.MistriaCompanion_floor_built({}),
+    h => h.context.MistriaCompanion_reset_save({}),
+  ]) {
+    const h = localSightingsHarness();
+    h.runtime.notifications_enabled = true;
+    h.bug(0);
+    h.advance();
+    h.expire();
+    change(h);
+    h.advance();
+    assert.equal(h.notices.length, 2);
+  }
+});
+
+test('automatic notices wait for menus and cutscenes but not unrelated native notifications', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  const first = h.bug(0);
+  const despawned = h.bug(1);
+  const existing = h.nativeNotice();
+  h.state.paused = true;
+  h.advance(30);
+  assert.equal(h.notices.length, 0);
+  h.advance(30);
+  h.state.paused = false;
+  h.state.cutscene = true;
+  h.catchBug(first);
+  despawned.alive = false;
+  h.bug(2);
+  h.advance(30);
+  assert.equal(h.notices.length, 0);
+  h.state.cutscene = false;
+  h.advance(12);
+  assert.equal(h.notices.length, 0);
+  h.advance(1);
+  assert.equal(h.notices[0].text, 'Butterfly: 0 active, 1 caught\nMoth: 1 active, 0 caught');
+  assert.equal(h.nativeToasts[0], existing);
+  assert.ok(h.toasts[0].y >= existing.y + existing.height);
+  h.state.cutscene = true;
+  h.toasts[0].think();
+  assert.equal(h.toasts[0].alpha, 0);
+});
+
+test('the old area cannot create an entry notice between transition hooks and actual arrival', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.bug(0);
+  h.advance();
+  h.expire();
+  h.context.MistriaCompanion_reset_local_sightings({}); // Native pre hook.
+  h.state.traveling = true;
+  h.context.MistriaCompanion_reset_local_sightings({}); // Native post hook schedules, not completes, travel.
+  h.advance(31);
+  assert.equal(h.state.ready, true, 'the native old grid remains ready throughout the fade');
+  assert.equal(h.notices.length, 1, 'never recreate the old region summary when starting to leave');
+  assert.equal(h.runtime.local_sightings, undefined);
+  h.show();
+  assert.match(h.feedback.at(-1), /not ready/);
+  h.context.CURRENT_LOCATION_ID = 1;
+  h.state.room = 'western ruins';
+  h.advance(10);
+  assert.equal(h.notices.length, 1, 'changing the room is not sufficient before Taxi finishes arrival');
+  h.state.traveling = false;
+  h.advance(12);
+  assert.equal(h.notices.length, 1);
+  h.advance(1);
+  assert.equal(h.notices.length, 2);
+  assert.equal(h.notices[1].text, 'Butterfly: 1 active, 0 caught');
+});
+
+test('departing retires only the companion notice without changing the native notification queue', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.bug(0);
+  h.advance();
+  const toast = h.toasts[0];
+  assert.ok(toast.board_get('timer') >= 240);
+  h.context.MistriaCompanion_reset_local_sightings({});
+  assert.equal(toast.alpha, 0, 'the pre hook hides an existing notice immediately');
+  assert.equal(toast.freed, true, 'the independently owned UI node can be freed immediately');
+  assert.equal(h.toasts.length, 1);
+  h.state.traveling = true;
+  h.advance(31);
+  assert.equal(h.notices.length, 1);
+  h.context.CURRENT_LOCATION_ID = 1;
+  h.state.traveling = false;
+  h.expire();
+  h.advance();
+  assert.equal(h.notices.length, 2);
+});
+
+test('automatic notices coalesce discoveries while a notice is visible or pending', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.bug(0);
+  h.advance();
+  h.bug(1);
+  h.advance(30);
+  h.bug(2);
+  h.advance(30);
+  assert.equal(h.notices.length, 1);
+  h.expire();
+  h.advance();
+  assert.equal(h.notices.length, 2);
+  assert.equal(h.notices[1].text, 'Snowball Beetle: 1 active, 0 caught\nMoth: 1 active, 0 caught');
+  h.expire();
+  h.advance(30);
+  assert.equal(h.notices.length, 2, 'multiple discoveries create one update, not a queue of snapshots');
+});
+
+test('F6 consumes a pending automatic summary and remains available with alerts off', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.bug(0);
+  h.advance(3);
+  h.show();
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.runtime.sightings_replay.automatic, false);
+  h.expire();
+  h.advance(30);
+  assert.equal(h.notices.length, 1);
+  h.runtime.notifications_enabled = false;
+  h.bug(2);
+  h.show();
+  h.toasts[0].think();
+  assert.equal(h.toasts[0].alpha, 1, 'F10 cannot hide a deliberately requested F6 notice');
+  assert.equal(h.notices[1].text, h.report());
+});
+
+test('empty areas and uncaught despawns never create an automatic no-sightings notice', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.advance(30);
+  assert.equal(h.notices.length, 0);
+  h.state.cutscene = true;
+  const bug = h.bug(0);
+  const fish = { alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } };
+  h.actors.fish.push(fish);
+  h.advance();
+  bug.alive = false;
+  fish.alive = false;
+  h.state.cutscene = false;
+  h.advance(30);
+  assert.equal(h.notices.length, 0);
+});
+
+test('new-species updates after an empty entry are compact and retain catches while deferred', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.context.CURRENT_LOCATION_ID = 2;
+  h.context.DUNGEON_RUNNER = { current_floor: 95, current_level: () => ({ impl: 'ruins' }) };
+  h.advance();
+  assert.equal(h.notices.length, 0);
+  assert.equal(h.runtime.local_sightings.entry_pending, false);
+  const first = h.bug(0);
+  h.advance(1);
+  h.state.cutscene = true;
+  h.catchBug(first);
+  h.bug(0);
+  h.advance();
+  h.state.cutscene = false;
+  h.advance();
+  assert.equal(h.notices[0].text, 'Butterfly: 1 active, 1 caught');
+  h.expire();
+  h.bug(0);
+  h.advance(30);
+  assert.equal(h.notices.length, 1, 'another bug of a known species never triggers an update');
+});
+
+test('leaving or disabling alerts discards pending automatic notices and hides visible ones', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.state.cutscene = true;
+  h.bug(0);
+  h.advance();
+  h.context.MistriaCompanion_reset_local_sightings({});
+  h.actors.bug.length = 0;
+  h.state.cutscene = false;
+  h.advance(30);
+  assert.equal(h.notices.length, 0);
+  h.bug(1);
+  h.advance(3);
+  h.runtime.notifications_enabled = false;
+  h.advance();
+  h.runtime.notifications_enabled = true;
+  h.advance(30);
+  assert.equal(h.notices.length, 0, 're-enabling does not revive a disabled pending report');
+  h.bug(2);
+  h.advance();
+  assert.equal(h.notices.length, 1);
+  h.runtime.notifications_enabled = false;
+  h.toasts[0].think();
+  assert.equal(h.toasts[0].alpha, 0);
+  h.replay();
+  assert.equal(h.runtime.sightings_replay, undefined);
+});
+
+test('automatic combined notices use the same bounded native pagination as F6', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.state.screenHeight = 200;
+  h.context.BUGS.get = () => ({ rarity: 'common' });
+  for (let i = 0; i < 24; i++) {
+    h.items.push({ name: `Long named automatic bug species ${i}` });
+    h.bug(h.items.length - 1);
+  }
+  h.advance();
+  const toast = h.toasts[0];
+  const pages = toast.board_get('mistria_sightings_pages');
+  assert.ok(pages.end < pages.lines.length);
+  assert.equal(pages.lines.join('').replace(/\s/g, ''), h.notices[0].text.replace(/\s/g, ''));
+  assert.ok(toast.height + h.toastMenu.base_y <= h.state.screenHeight - 8);
+  for (let i = 0; i < 10000 && !toast.freed; i++) toast.think();
+  assert.equal(toast.freed, true);
+  assert.equal(pages.end, pages.lines.length);
+  assert.equal(h.notices.length, 1);
+});
+
+test('legendary fish still trigger a combined notice once per species and location per day', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
+  h.advance();
+  assert.equal(h.notices[0].text, 'Legendary fish - Legendary Fish: 1 active');
+  h.expire();
+  h.context.MistriaCompanion_reset_local_sightings({});
+  h.advance();
+  assert.equal(h.notices.length, 1);
+  h.context.CURRENT_LOCATION_ID = 1;
+  h.runtime.seen_spawns = {};
+  h.advance();
+  assert.equal(h.notices.length, 2);
+  h.expire();
+  h.state.day++;
+  h.advance();
+  assert.equal(h.notices.length, 3);
+});
+
+test('sighting notices slide in and out like native dig alerts without spending their reading time', () => {
+  const h = localSightingsHarness();
+  h.bug(0);
+  h.show();
+  const toast = h.toasts[0];
+  const width = toast.width;
+  const timer = toast.board_get('timer');
+  assert.equal(toast.x, -width);
+  for (let frame = 1; frame <= 30; frame++) {
+    toast.think();
+    assert.ok(Math.abs(toast.x + width * ((1 - frame / 30) ** 4)) < 0.00001);
+    assert.equal(toast.board_get('timer'), timer, 'slide-in must not shorten the reading interval');
+  }
+  assert.equal(toast.x, 0);
+  for (let frame = 0; frame < timer; frame++) toast.think();
+  assert.equal(toast.freed, false, 'expiration starts slide-out, not abrupt deletion');
+  for (let frame = 1; frame <= 29; frame++) {
+    toast.think();
+    assert.ok(Math.abs(toast.x + width * (1 - ((1 - frame / 30) ** 4))) < 0.00001);
+    assert.equal(toast.freed, false);
+  }
+  h.state.cutscene = true;
+  const x = toast.x;
+  for (let i = 0; i < 60; i++) toast.think();
+  assert.equal(toast.x, x, 'a hidden animation must not run down during a cutscene');
+  assert.equal(toast.alpha, 0);
+  h.state.cutscene = false;
+  toast.think();
+  assert.equal(toast.x, -width);
+  assert.equal(toast.freed, true);
+  assert.equal(h.notices.length, 1);
+  assert.doesNotMatch(source, /sightings_debug|trace_sightings|\[sightings-v48\]/);
 });
 
 test('wiki hints and action feedback remain visible while automatic alerts are off', () => {
@@ -2409,7 +2913,8 @@ class Node {
   board_get(key) { return this.board.get(key); }
   board_set(key, value) { this.board.set(key, value); return this; }
   set_xy(x, y) { this.x = x; this.y = y; return this; }
-  set_lut() { return this; }
+  set_lut(sprite, index = 1) { this.lut = { sprite, index, enabled: true }; return this; }
+  disable_lut() { if (this.lut) this.lut.enabled = false; return this; }
   listen_for_hovers() { return this; }
   set_sprite(sprite) { this.sprite = sprite; return this; }
   set_outline_sprite(sprite) { this.outline = sprite; return this; }
@@ -3057,7 +3562,8 @@ function museumHarness(wing = 0) {
     ITEM_PROTOTYPES: prototypes,
     COMMON_LUT: 0,
     CommonLutIndex: { Header: 1 },
-    spr_ui_tooltip_header_box: 1,
+    spr_ui_tooltip_header_box: 'header-only',
+    spr_ui_tooltip_box: 'complete-tooltip-box',
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_ready: () => true,
     __MistriaCompanion_menu: kind => {
@@ -3111,6 +3617,12 @@ test('museum missing slots in every wing use native sorted item identities and i
       const expected = h.names[h.sorted[i]];
       assert.equal(h.resolve(), expected);
       assert.equal(h.runtime.museum_label.board_get('name').text, expected);
+      assert.equal(h.runtime.museum_label.sprite, 'complete-tooltip-box',
+        'standalone name labels need all four borders, not the open-bottom tooltip header');
+      const label = h.runtime.museum_label.board_get('name');
+      assert.equal(h.runtime.museum_label.width, label.width + 8);
+      assert.equal(h.runtime.museum_label.height, label.height + 8,
+        'the name retains padding above and below the full border');
       assert.equal(h.target().donated, false);
       h.context.MistriaCompanion_open_wiki();
       assert.equal(h.clipboard.at(-1), `https://fieldsofmistria.wiki.gg/wiki/${expected.replaceAll(' ', '_')}`);
@@ -3603,6 +4115,7 @@ test('map markers group bug species and counts while preserving native-size hove
   assert.equal(hubs[0].node.children.length, 2);
   assert.equal(bug.board_get('label').text, 'Ant x2\nLuna Moth x1');
   assert.equal(bug.sprite, 11);
+  assert.notEqual(bug.lut?.enabled, true, 'full-color bug item sprites must not use the text-color palette');
   assert.equal(runtime.map_wiki_nodes[0].title, 'Bugs');
   assert.deepEqual([bug.x, bug.y, dig.x, dig.y], [-10, -10, 10, -10]);
   assert.equal(dig.outline, 13);
@@ -3617,6 +4130,15 @@ test('map markers group bug species and counts while preserving native-size hove
   refresh();
   assert.equal(bug.board_get('label').text, 'Luna Moth x1');
   assert.equal(runtime.map_wiki_nodes[0].title, 'Luna Moth');
+  bug.set_lut(context.COMMON_LUT);
+  runtime.all_bug_markers_enabled = true;
+  bugs = [{ id: 1, item_id: 0, x: 10, y: 10 }];
+  refresh();
+  assert.equal(hubs[0].node.board_get('mistria_item_details_bug_marker'), bug);
+  assert.equal(bug.sprite, 10, 'the existing marker switches to the remaining species icon');
+  assert.equal(bug.lut.enabled, false, 'a reused marker must also clear any stale silhouette palette');
+  assert.equal(bug.board_get('label').text, 'Ant x1');
+  assert.equal(runtime.map_wiki_nodes[0].title, 'Ant');
   bugs = [];
   runtime.dig_spots = [];
   refresh();
@@ -4060,6 +4582,14 @@ test('clock status hides behind menus, cutscenes, and overlapping HUD elements o
   toast.x = -toast.width; // Notice slides fully off-screen.
   h.update();
   assert.equal(label.alpha, 1);
+  const sighting = new h.HudNode(undefined, p.x, p.y, 170, 42);
+  h.runtime.sightings_replay = { toast: sighting };
+  h.update();
+  assert.equal(label.alpha, 0, 'the independent sighting notice also protects the clock label from overlap');
+  sighting.disable();
+  h.update();
+  assert.equal(label.alpha, 1);
+  h.runtime.sightings_replay = undefined;
   for (const menu of ['info', 'toolbar', 'glyphs']) {
     const canvas = new h.HudNode(undefined, 0, 0, 480, 270, 'canvas');
     const blocker = new h.HudNode(canvas, p.x, p.y, 24, 24);
@@ -4091,7 +4621,7 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     MistriaCompanion_update_settings_keybinds: () => {},
     MistriaCompanion_update_gift_tooltips: () => { assert.equal(ready, true); },
     MistriaCompanion_update_seed_makers: () => { assert.equal(ready, true); },
-    __MistriaCompanion_update_local_sightings: () => { assert.equal(ready, true); },
+    MistriaCompanion_track_local_spawns: () => { assert.equal(ready, true); },
     MistriaCompanion_replay_local_sightings: () => { assert.equal(ready, true); },
     MistriaCompanion_update_mounted_interactions: () => {
       assert.equal(ready, true, 'mounted initialization must wait until the world is ready');
@@ -4103,8 +4633,6 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     __MistriaCompanion_map_hubs: () => [],
     MistriaCompanion_detect_dig_spots: () => { scans++; runtime.dig_spot_delay = -1; },
     MistriaCompanion_show_dig_spot_notice: () => { assert.equal(ready, true); },
-    MistriaCompanion_show_mine_bug_spawns: () => { runtime.mine_bug_delay = -1; },
-    MistriaCompanion_track_legendary_spawns: () => {},
     MistriaCompanion_update_birthday_label: () => {},
     MistriaCompanion_add_map_labels: () => {},
     MistriaCompanion_refresh_map_markers: () => refreshes++,

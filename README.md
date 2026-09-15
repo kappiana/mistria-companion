@@ -14,12 +14,11 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Reveals names when hovering darkened collection items in all four Museum wings, with individual item wiki links.
 - Shows villager names when hovering known NPC map markers.
 - Displays today's birthdays and the companion's clock-pause status below the visible vitals and status-effect icons.
-- Offers optional alerts for legendary fish and very rare bug spawns.
-- Shows local F6 notices for active bugs, bugs caught during the current visit, and currently active legendary fish.
+- Offers optional combined alerts for all bug species and legendary fish.
+- Shows one combined local F6 notice for active bugs, bugs caught during the current visit, and currently active legendary fish.
 - Groups active bugs into one marker per map hub, with species and counts on hover and ordinary bugs shown by default.
 - Optionally announces active dig spots when entering a location or mine floor and marks their general areas at the nearest map hubs.
 - Reveals the active daily Mist Spot on its area's map, even before visiting that area.
-- Optionally lists bugs initially spawned on each newly entered mine floor.
 - Pauses natural clock progression without pausing gameplay or overriding the game's own clock stops.
 - Lists the mod's active keybindings on the otherwise-empty right side of the Settings landing page.
 
@@ -64,7 +63,7 @@ launch, or when upgrading without a saved preference:
 
 | Setting | Default | Change it with |
 | --- | --- | --- |
-| Automatic alerts for rare spawns, dig spots, and mine-floor bugs | **Off** | **F10** |
+| Automatic alerts for all bugs, legendary fish, and dig spots | **Off** | **F10** |
 | Ordinary bugs on the map, alongside very rare bugs | **On** | **F9** |
 | Compact `F7 Wiki` hints | **On** | **F8** |
 
@@ -77,7 +76,7 @@ birthdays, or feedback for actions you take, such as copying a wiki link.
 You can still press **F6** for the current area's bug and legendary-fish notices
 while automatic alerts are off.
 
-When dig alerts are enabled, they wait until cutscenes and NPC dialogue end.
+When automatic alerts are enabled, they wait until cutscenes and NPC dialogue end.
 They appear afterward only if you are still in the same area or mine-floor visit.
 
 ## Controls
@@ -85,7 +84,7 @@ They appear afterward only if you are still in the same area or mine-floor visit
 | Key | Action |
 | --- | --- |
 | **F5** | Pause natural clock progression or release the companion's pause. |
-| **F6** | Replay current-area bug counts and active legendary fish as left-side notices. |
+| **F6** | Show current-area bug counts and active legendary fish together in one left-side notice. |
 | **F7** | Copy the relevant Fields of Mistria Wiki URL while supported content is selected or hovered. |
 | **F8** | Show or hide the compact `F7 Wiki` hints. |
 | **F9** | Show or hide ordinary bug map markers. |
@@ -108,7 +107,9 @@ item you happened to inspect. A mixed-species bug marker links to the wiki's Bug
 page; a single-species marker links to that bug.
 
 In the Museum's Archaeology, Fish, Flora, and Insects wings, hover a darkened item
-icon to see its name. Press **F7** over an item icon to copy that item's wiki link,
+icon to see its name in a complete bordered label. This label shows the name
+only; there is no hidden description beneath it. Press **F7** over an item icon
+to copy that item's wiki link,
 whether or not it has been donated. Empty space on the collection page still
 links to the wing. The icons remain darkened until donation; looking up an item
 does not unlock it or change collection progress. **F8** hides only wiki-key
@@ -287,28 +288,60 @@ preserved when upgrading.
 
 ## Spawn information
 
-### Automatic alerts and rare sightings
+### Automatic bug and legendary-fish alerts
 
-Automatic alerts for legendary fish, very rare bugs, dig spots, and new mine-floor
-bug summaries are **off by default**. Press **F10** to enable or disable them as a
+Automatic alerts for **all bug species**, legendary fish, and dig spots are
+**off by default**. Press **F10** to enable or disable them as a
 group; your choice is remembered next time you play. Enabling alerts affects new
 spawns and visits rather than replaying old notices.
 
-Automatic legendary-fish and very-rare-bug notices refer only to creatures that
-actually spawn in a map you visit. These alerts are deduplicated by species and
-location for the current day.
+With alerts enabled, entering an area or mine floor with bugs shows **one combined
+left-side notification**, using the same layout as F6: each bug
+species' **active** and **caught** counts, and any active legendary fish. It includes
+ordinary, rare, and very rare bugs, regardless of your F9 map-marker setting.
+Only notices inside the mines have a location heading, including the floor number.
+
+The full summary appears automatically **only once per visit**. Press **F6** to
+see the full list again.
+
+If a **new bug species** is discovered later during that visit, including from
+breaking rocks, a small update shows **only that species**, such as
+`Moth: 1 active, 0 caught`. More bugs of an already seen species or catching bugs
+do not trigger extra notices. A newly spotted legendary fish gets a small update
+too, once per fish species and location per day.
+
+These notices replace the separate `Very Rare Bug` and `Mine bugs:` pop-ups.
+They slide in from the left and slide back out when finished, like dig-spot
+notifications. They never pause gameplay, and long lists cycle through pages
+inside the same notification. Discoveries made while a notice is visible are
+grouped into one new-species update rather than repeating the full list. Pressing
+F6 before an automatic notice appears shows the report without a duplicate afterward.
+
+Automatic notices wait for menus, cutscenes, and dialogue to finish, but appear
+**alongside other notifications**, in their own space below them, instead of
+waiting for the whole notification queue to clear. Deferred reports use fresh
+counts: uncaught despawns and fish no longer present are excluded. Empty areas do
+not produce automatic notices. Leaving the
+area or turning F10 off discards pending automatic notices.
+Sighting notices wait for the actual room transition to finish, so leaving an
+area does not trigger another summary for the area you are departing.
 
 ### F6: Bugs and legendary fish here
 
-Press **F6** to show normal notifications on the **left side of the screen** for
+Press **F6** to show one combined notification on the **left side of the screen** for
 your **current area or mine floor**, not the day's history from other locations.
 F6 never opens a menu, pauses gameplay, or takes control away from you.
 
-The notices include every bug species with separate **active** and **caught**
-counts, plus any legendary fish still active there. Ordinary bugs are included
-even if you have hidden them on the map. Longer lists play one notice at a time
-so entries do not pile off-screen. Repeated F6 presses while a list is playing
-do not queue duplicate lists.
+The notice lists every bug species with separate **active** and **caught** counts,
+plus any legendary fish still active there. Outside the mines, it starts directly
+with the list, without a location heading. Inside the mines, it keeps the location
+and floor-number heading.
+Ordinary bugs are included even if you have hidden them on the map. If the full
+list is taller than the screen allows, the same notification cycles through
+pages automatically rather than creating extra pop-ups or clipping names. Pages
+adjust to the space below other notifications. If the screen is temporarily too
+full, the notice hides until there is room without using up its reading time.
+Repeated F6 presses while the notice is visible do not create duplicates.
 
 Caught counts come from actual net catches during this visit, not items bought,
 picked up, or carried in your inventory. Bugs that disappear without being
@@ -317,17 +350,19 @@ listed. Legendary fish that were caught or despawned are not listed.
 
 Catch counts reset when you leave the area, change mine floors, start a new day,
 or reload a save. The list is a snapshot taken when you press F6; press it again
-after the notices finish to refresh. Leaving the area cancels the remaining
-notices. Notices wait while a menu or cutscene is active; an on-screen sighting
-notice is hidden if a cutscene starts.
+after the notice finishes to refresh. Leaving the area discards the pending
+notice. It waits while a menu or cutscene is active; an on-screen sighting
+notice hides during menus or cutscenes and resumes with its remaining reading
+time if you are still in the same visit.
 
 ### Bugs on the map
 
 All active bug species are shown on the map by default, grouped at the nearest
 map hubs rather than exact world positions. Press **F9** to hide ordinary species
 or show them again; this choice persists. Very rare species remain included.
-Each hub has one marker; hover it for the species and counts. A very rare species
-supplies the icon when the group contains one. Turning automatic alerts off
+Each hub has one marker using a bug's full-color item icon; hover it for the
+species and counts. A very rare species supplies the icon when the group contains
+one. Turning automatic alerts off
 does not change bug-map visibility.
 
 ### Dig spots and cutscenes
@@ -354,18 +389,11 @@ This marker is independent of F9 and F10. It follows the game's active Mist Spot
 state, disappears after the spot is used, and updates when the daily spot changes.
 It does not unlock Mist Sight, create a spot, spend Essence, or change rewards.
 
-### Mine-floor bug summaries
-
-With automatic alerts enabled, entering a newly generated mine floor shows a
-compact `Mine bugs:` notification listing the bugs initially present. Duplicate
-species include a count.
-
 ## Known limitations
 
 - The game runtime cannot open web links directly, so F7 copies links to the clipboard.
 - Dig markers show approximate areas and do not reveal exact coordinates or predict what a spot contains.
 - Quest Details wiki detection depends on the active objective data exposed by the game and may not recognize every objective layout.
-- Mine bug summaries include only bugs present when the floor finishes loading; bugs revealed later from rocks or other interactions are not included.
 - Long recipe lists are summarized rather than expanded in full.
 - Gift selection has a search limit to avoid long delays. If the notification says that limit was reached, additional gifts may still fit in your backpack.
 - Other mods can register the same hotkeys or change native menus and game data. Remap conflicting keys and test your actual mod combination.

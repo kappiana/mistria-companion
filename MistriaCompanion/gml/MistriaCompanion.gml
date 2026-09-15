@@ -32,8 +32,6 @@ function __MistriaCompanion_runtime() {
             map_signature: "",
             map_wiki_nodes: [],
             map_labels_ready: false,
-            mine_bug_floor: "",
-            mine_bug_delay: -1,
             dig_spot_visit_key: "",
             dig_spot_delay: -1,
             dig_spot_notice: undefined,
@@ -86,8 +84,6 @@ function MistriaCompanion_reset_save(_ctx) {
     _runtime.visit_grid = undefined;
     _runtime.visit_counter = -1;
     _runtime.visit_day = "";
-    _runtime.mine_bug_floor = "";
-    _runtime.mine_bug_delay = -1;
     _runtime.dig_spot_visit_key = "";
     _runtime.dig_spot_delay = -1;
     _runtime.dig_spot_notice = undefined;
@@ -953,18 +949,18 @@ function __MistriaCompanion_track_legendary(_kind, _item_id) {
     }
 
     var _seen_key = _kind + ":" + string(_item_id);
-    if (__MistriaCompanion_field(_runtime.seen_spawns, _seen_key) == true) return;
+    if (__MistriaCompanion_field(_runtime.seen_spawns, _seen_key) == true) return false;
     var _item_data = global[$ "__item_data"];
-    if (!is_array(_item_data) || _item_id < 0 || _item_id >= array_length(_item_data)) return;
+    if (!is_array(_item_data) || _item_id < 0 || _item_id >= array_length(_item_data)) return false;
     _runtime.seen_spawns[$ _seen_key] = true;
 
     var _location = __MistriaCompanion_location_name(CURRENT_LOCATION_ID);
     var _name = __MistriaCompanion_name(_item_data[_item_id]);
     var _entry = _kind + ": " + _name + " - " + _location;
-    if (__MistriaCompanion_has_name(_runtime.legendary_sightings, _entry)) return;
+    if (__MistriaCompanion_has_name(_runtime.legendary_sightings, _entry)) return false;
 
     array_push(_runtime.legendary_sightings, _entry);
-    if (_runtime.notifications_enabled) __MistriaCompanion_notify(_entry, 60 * 4);
+    return true;
 }
 
 function __MistriaCompanion_visit_legendary_fish(_fish, _callback) {
@@ -1001,22 +997,21 @@ function __MistriaCompanion_each_live_legendary_fish(_callback) {
     }
 }
 
-function __MistriaCompanion_track_rare_bug(_item_id, _data) {
-    if (_data.rarity == "very_rare") __MistriaCompanion_track_legendary("Very Rare Bug", _item_id);
+function __MistriaCompanion_sightings_transition_active() {
+    // Both room-transition hooks run before the fade-out and actual room swap.
+    return TAXI != undefined && TAXI.is_traveling();
 }
 
-function __MistriaCompanion_track_rare_fish(_item_id) {
-    __MistriaCompanion_track_legendary("Legendary Fish", _item_id);
-}
-
-function MistriaCompanion_track_legendary_spawns() {
-    if (BUGS == undefined || FISH == undefined) return;
-    __MistriaCompanion_each_live_bug(__MistriaCompanion_track_rare_bug);
-    __MistriaCompanion_each_live_legendary_fish(__MistriaCompanion_track_rare_fish);
+function __MistriaCompanion_retire_sightings_notice(_node) {
+    if (_node == undefined || _node.freed || _node.marked_for_death) return;
+    _node.set_alpha(0).disable();
+    ANCHOR.free_node(_node);
 }
 
 function MistriaCompanion_reset_local_sightings(_ctx) {
     var _runtime = __MistriaCompanion_runtime();
+    var _replay = _runtime.sightings_replay;
+    if (_replay != undefined) __MistriaCompanion_retire_sightings_notice(_replay.toast);
     _runtime.local_sightings = undefined;
     _runtime.sightings_replay = undefined;
 }
@@ -1049,6 +1044,7 @@ function __MistriaCompanion_add_local_species(_species, _item_id, _active, _caug
 }
 
 function __MistriaCompanion_update_local_sightings() {
+    if (__MistriaCompanion_sightings_transition_active()) return undefined;
     var _catches = __MistriaCompanion_field(GAME_STATS, "bugs_caught");
     if (GRID == undefined || __MistriaCompanion_field(GRID, "is_setup") != true
         || BUGS == undefined || !is_array(_catches) || !is_array(global[$ "__item_data"])) return undefined;
@@ -1059,7 +1055,8 @@ function __MistriaCompanion_update_local_sightings() {
         || _local.stats != GAME_STATS || _local.catch_index > array_length(_catches))
     {
         _local = { grid: GRID, key: _key, stats: GAME_STATS,
-            catch_index: array_length(_catches), caught: {} };
+            catch_index: array_length(_catches), caught: {},
+            seen_bugs: {}, pending_bugs: {}, pending_fish: {}, notice_wait: 12, entry_pending: true };
         _runtime.local_sightings = _local;
     }
     // The native net action appends this log only for catches, not purchases or despawns.
@@ -1096,12 +1093,61 @@ function __MistriaCompanion_local_species_rows(_species) {
     return _rows;
 }
 
-function __MistriaCompanion_local_sightings_report() {
-    var _local = __MistriaCompanion_update_local_sightings();
-    if (_local == undefined || FISH == undefined) return undefined;
+function __MistriaCompanion_live_sightings() {
     var _report = { bugs: {}, fish: {} };
     __MistriaCompanion_each_live_bug(method(_report, __MistriaCompanion_collect_local_bug));
     __MistriaCompanion_each_live_legendary_fish(method(_report, __MistriaCompanion_collect_local_fish));
+    return _report;
+}
+
+function MistriaCompanion_track_local_spawns() {
+    var _local = __MistriaCompanion_update_local_sightings();
+    if (_local == undefined || FISH == undefined) return;
+    var _runtime = __MistriaCompanion_runtime();
+    var _live = __MistriaCompanion_live_sightings();
+    if (!_runtime.notifications_enabled) _local.entry_pending = false;
+    var _bugs = __MistriaCompanion_local_species_rows(_live.bugs);
+    var _fish = __MistriaCompanion_local_species_rows(_live.fish);
+    var _pending_bugs = {};
+    var _pending_fish = {};
+    for (var _index = 0; _index < array_length(_bugs); _index++) {
+        var _key = string(_bugs[_index].item_id);
+        var _new = __MistriaCompanion_field(_local.seen_bugs, _key) != true;
+        _local.seen_bugs[$ _key] = true;
+        if (_runtime.notifications_enabled
+            && (_new || __MistriaCompanion_field(_local.pending_bugs, _key) == true))
+        {
+            _pending_bugs[$ _key] = true;
+            if (_new) _local.notice_wait = 12;
+        }
+    }
+    // Keep catches in a deferred report, but discard uncaught despawns.
+    var _caught = __MistriaCompanion_local_species_rows(_local.caught);
+    for (var _index = 0; _index < array_length(_caught); _index++) {
+        var _key = string(_caught[_index].item_id);
+        if (_runtime.notifications_enabled && __MistriaCompanion_field(_local.pending_bugs, _key) == true) {
+            _pending_bugs[$ _key] = true;
+        }
+    }
+    for (var _index = 0; _index < array_length(_fish); _index++) {
+        var _item_id = _fish[_index].item_id;
+        var _key = string(_item_id);
+        var _new = __MistriaCompanion_track_legendary("Legendary Fish", _item_id);
+        if (_runtime.notifications_enabled
+            && (_new || __MistriaCompanion_field(_local.pending_fish, _key) == true))
+        {
+            _pending_fish[$ _key] = true;
+            if (_new) _local.notice_wait = 12;
+        }
+    }
+    _local.pending_bugs = _pending_bugs;
+    _local.pending_fish = _pending_fish;
+}
+
+function __MistriaCompanion_local_sightings_report(_pending=undefined) {
+    var _local = __MistriaCompanion_update_local_sightings();
+    if (_local == undefined || FISH == undefined) return undefined;
+    var _report = __MistriaCompanion_live_sightings();
     var _caught = __MistriaCompanion_local_species_rows(_local.caught);
     for (var _index = 0; _index < array_length(_caught); _index++) {
         var _entry = _caught[_index];
@@ -1110,82 +1156,35 @@ function __MistriaCompanion_local_sightings_report() {
     var _bugs = __MistriaCompanion_local_species_rows(_report.bugs);
     var _fish = __MistriaCompanion_local_species_rows(_report.fish);
     var _items = global[$ "__item_data"];
-    var _notices = [];
-    var _location = __MistriaCompanion_dig_spot_location_name();
+    var _text = "";
+    if (_pending == undefined && DUNGEON_RUNNER != undefined) {
+        _text = __MistriaCompanion_dig_spot_location_name();
+    }
+    var _included = 0;
     for (var _index = 0; _index < array_length(_bugs); _index++) {
         var _entry = _bugs[_index];
-        array_push(_notices, _location + "\n" + __MistriaCompanion_name(_items[_entry.item_id]) + ": "
-            + string(_entry.active) + " active, " + string(_entry.caught) + " caught");
+        if (_pending != undefined
+            && __MistriaCompanion_field(_pending.bugs, string(_entry.item_id)) != true) continue;
+        if (_text != "") _text += "\n";
+        _text += __MistriaCompanion_name(_items[_entry.item_id]) + ": "
+            + string(_entry.active) + " active, " + string(_entry.caught) + " caught";
+        _included++;
     }
     for (var _index = 0; _index < array_length(_fish); _index++) {
         var _entry = _fish[_index];
-        array_push(_notices, _location + "\nLegendary fish - " + __MistriaCompanion_name(_items[_entry.item_id])
-            + ": " + string(_entry.active) + " active");
+        if (_pending != undefined
+            && __MistriaCompanion_field(_pending.fish, string(_entry.item_id)) != true) continue;
+        if (_text != "") _text += "\n";
+        _text += "Legendary fish - " + __MistriaCompanion_name(_items[_entry.item_id])
+            + ": " + string(_entry.active) + " active";
+        _included++;
     }
-    if (array_length(_notices) == 0) {
-        array_push(_notices, _location + "\nNo active or caught bugs this visit. No legendary fish active here.");
+    if (_included == 0) {
+        if (_pending != undefined) return "";
+        if (_text != "") _text += "\n";
+        _text += "No active or caught bugs this visit. No legendary fish active here.";
     }
-    return _notices;
-}
-
-function MistriaCompanion_show_mine_bug_spawns() {
-    var _runtime = __MistriaCompanion_runtime();
-    if (DUNGEON_RUNNER == undefined) {
-        _runtime.mine_bug_floor = "";
-        _runtime.mine_bug_delay = -1;
-        return;
-    }
-
-    var _level = DUNGEON_RUNNER.current_level();
-    if (_level == undefined || __MistriaCompanion_field(GRID, "is_setup") != true) return;
-    var _floor_key = string(DUNGEON_RUNNER.current_floor) + ":"
-        + string(room()) + ":" + string(_level.impl);
-    if (_runtime.mine_bug_floor != _floor_key) {
-        _runtime.mine_bug_floor = _floor_key;
-        _runtime.mine_bug_delay = 0;
-        return;
-    }
-
-    if (_runtime.mine_bug_delay > 0) {
-        _runtime.mine_bug_delay--;
-        return;
-    }
-    if (_runtime.mine_bug_delay != 0) return;
-    var _item_data = global[$ "__item_data"];
-    if (BUGS == undefined || !is_array(_item_data)) return;
-    _runtime.mine_bug_delay = -1;
-    if (!_runtime.notifications_enabled) return;
-
-    var _names = [];
-    var _counts = [];
-    for (var _index = 0; _index < instance_number(obj_bug); _index++) {
-        var _bug = instance_find(obj_bug, _index);
-        var _item_id = __MistriaCompanion_field(_bug, "item_id");
-        if (_item_id == undefined || _item_id < 0 || _item_id >= array_length(_item_data)) continue;
-
-        var _name = __MistriaCompanion_name(_item_data[_item_id]);
-        var _name_index = __MistriaCompanion_name_index(_names, _name);
-        if (_name_index == -1) {
-            array_push(_names, _name);
-            array_push(_counts, 1);
-        } else {
-            _counts[_name_index]++;
-        }
-    }
-
-    if (array_length(_names) == 0) return;
-
-    var _summary = "";
-    for (var _index = 0; _index < array_length(_names); _index++) {
-        if (_index > 0) _summary += ", ";
-        _summary += _names[_index];
-        if (_counts[_index] > 1) _summary += " x" + string(_counts[_index]);
-    }
-
-    create_notification(
-        ANCHOR.wrap_for_local("Mine bugs: " + _summary),
-        60 * 3
-    );
+    return _text;
 }
 
 function MistriaCompanion_show_local_sightings() {
@@ -1195,50 +1194,193 @@ function MistriaCompanion_show_local_sightings() {
     }
     var _runtime = __MistriaCompanion_runtime();
     if (_runtime.sightings_replay != undefined) return;
-    var _notices = __MistriaCompanion_local_sightings_report();
-    if (_notices == undefined) {
+    MistriaCompanion_track_local_spawns();
+    var _text = __MistriaCompanion_local_sightings_report();
+    if (_text == undefined) {
         __MistriaCompanion_notify("Sightings are not ready yet. Try again after the area loads.", 60 * 3);
         return;
     }
+    var _local = _runtime.local_sightings;
+    _local.pending_bugs = {};
+    _local.pending_fish = {};
+    _local.entry_pending = false;
     _runtime.sightings_replay = {
-        grid: GRID, visit_key: __MistriaCompanion_local_visit_key(), notices: _notices, index: 0, toast: undefined
+        grid: GRID, visit_key: _local.key, local: _local, automatic: false, text: _text, toast: undefined
     };
     MistriaCompanion_replay_local_sightings();
 }
 
-function MistriaCompanion_sightings_notice_think(_node, _grid, _visit_key) {
-    if (_node.freed) return;
-    if (!__MistriaCompanion_ready() || GRID != _grid
-        || __MistriaCompanion_local_visit_key() != _visit_key || __MistriaCompanion_dig_notice_blocked())
+function __MistriaCompanion_size_sightings_notice(_node, _menu) {
+    var _top = _menu.base_y;
+    for (var _index = 0; _index < _menu.toasts.count(); _index++) {
+        var _other = _menu.toasts.get(_index);
+        if (_other.freed || !_other.get_enabled() || _other.get_alpha() <= 0) continue;
+        _top = max(_top, _other.get_y() + _other.get_height() + 4);
+    }
+    var _text = _node.board_get("text");
+    var _max_height = ANCHOR.get_true_size().y - _top - 8;
+    var _line_height = _text.get_line_height();
+    if (_line_height == undefined) _line_height = font_line_height(_text.get_font());
+    if (_max_height < max(26, _line_height + 12)) return false;
+    _node.set_y(_top);
+    var _lines_per_page = max(1, floor((_max_height - 12) / _line_height));
+    var _pages = _node.board_get("mistria_sightings_pages");
+    var _end = min(array_length(_pages.lines), _pages.start + _lines_per_page);
+    if (_end != _pages.end) {
+        var _page = "";
+        for (var _index = _pages.start; _index < _end; _index++) {
+            if (_index > _pages.start) _page += "\n";
+            _page += _pages.lines[_index];
+        }
+        _text.set_text(_page);
+        _node.set_height(max(26, _text.measure().y + 12));
+        _pages.end = _end;
+        _pages.wait = max(240, min(600, (_end - _pages.start) * 30));
+        _node.board_set("timer", _pages.wait);
+    }
+    return true;
+}
+
+function __MistriaCompanion_create_sightings_notice(_contents, _menu) {
+    var _node = ANCHOR.nine_slice(_menu.canvas)
+        .set_sprite(spr_ui_hud_quest_toast_box).set_xy(0, _menu.base_y).set_alpha(0);
+    _node.cache_is_dirty = true;
+    ANCHOR.sprite(_node).set_sprite(spr_ui_hud_quest_toast_icon)
+        .set_xy(5, 0).set_align(Align.LeftIn, Align.Middle);
+    var _text_x = 9 + sprite_get_width(spr_ui_hud_quest_toast_icon);
+    var _text = ANCHOR.text(_node).set_xy(_text_x, 6)
+        .set_max_width(180 - _text_x - 10).set_lut(COMMON_LUT)
+        .allow_line_breaks().set_text(_contents);
+    var _size = _text.measure();
+    _node.set_width(min(180, _text_x + _size.x + 10));
+    _node.set_x(-_node.get_width());
+    _node.board_set("text", _text);
+    _node.board_set("mistria_sightings_menu", _menu);
+    _node.board_set("mistria_sightings_pages", {
+        lines: string_split(_text.display_text, "\n"), start: 0, end: 0, wait: 0
+    });
+    _node.board_set("mistria_sightings_motion", { phase: "in", frame: 0 });
+    if (__MistriaCompanion_size_sightings_notice(_node, _menu)) _node.set_alpha(1);
+    return _node;
+}
+
+function MistriaCompanion_sightings_notice_think(_node, _local, _automatic) {
+    if (_node.freed || _node.marked_for_death) return;
+    var _runtime = __MistriaCompanion_runtime();
+    var _menu = __MistriaCompanion_menu(Menu.InfoToasts);
+    if (!__MistriaCompanion_ready() || _runtime.local_sightings != _local || GRID != _local.grid
+        || __MistriaCompanion_local_visit_key() != _local.key
+        || _menu != _node.board_get("mistria_sightings_menu")
+        || __MistriaCompanion_sightings_transition_active()
+        || (_automatic && !_runtime.notifications_enabled))
+    {
+        __MistriaCompanion_retire_sightings_notice(_node);
+        return;
+    }
+    if (game_paused() || __MistriaCompanion_dig_notice_blocked() || _menu.hide_requests > 0
+        || !_menu.canvas.get_enabled() || _menu.canvas.get_alpha() <= 0
+        || !__MistriaCompanion_size_sightings_notice(_node, _menu))
     {
         _node.set_alpha(0);
+        return;
+    }
+    _node.set_alpha(1);
+    var _motion = _node.board_get("mistria_sightings_motion");
+    if (_motion.phase != "read") {
+        // Match the native notification's 30-frame QuartOut slide in both directions.
+        _motion.frame++;
+        var _remaining = 1 - min(1, _motion.frame / 30);
+        var _curve = _remaining * _remaining * _remaining * _remaining;
+        _node.set_x(-_node.get_width() * (_motion.phase == "in" ? _curve : 1 - _curve));
+        if (_motion.frame >= 30) {
+            if (_motion.phase == "out") {
+                __MistriaCompanion_retire_sightings_notice(_node);
+            } else {
+                _motion.phase = "read";
+                _node.set_x(0);
+            }
+        }
+        return;
+    }
+    var _pages = _node.board_get("mistria_sightings_pages");
+    _pages.wait--;
+    _node.board_set("timer", _pages.wait);
+    if (_pages.wait <= 0) {
+        if (_pages.end < array_length(_pages.lines)) {
+            _pages.start = _pages.end;
+            _pages.end = 0;
+        } else {
+            _motion.phase = "out";
+            _motion.frame = 0;
+        }
     }
 }
 
 function MistriaCompanion_replay_local_sightings() {
+    if (__MistriaCompanion_sightings_transition_active()) return;
     var _runtime = __MistriaCompanion_runtime();
     var _replay = _runtime.sightings_replay;
-    if (_replay == undefined) return;
-    if (GRID != _replay.grid || __MistriaCompanion_local_visit_key() != _replay.visit_key) {
+    if (_replay == undefined) {
+        var _local = _runtime.local_sightings;
+        if (_local == undefined || !_runtime.notifications_enabled || GRID != _local.grid
+            || __MistriaCompanion_local_visit_key() != _local.key
+            || (!_local.entry_pending && array_length(struct_get_names(_local.pending_bugs)) == 0
+                && array_length(struct_get_names(_local.pending_fish)) == 0)) return;
+        if (game_paused() || __MistriaCompanion_dig_notice_blocked()) {
+            _local.notice_wait = 12;
+            return;
+        }
+        if (_local.notice_wait > 0) {
+            _local.notice_wait--;
+            return;
+        }
+        if (array_length(struct_get_names(_local.pending_bugs)) == 0
+            && array_length(struct_get_names(_local.pending_fish)) == 0)
+        {
+            _local.entry_pending = false;
+            return;
+        }
+        var _menu = __MistriaCompanion_menu(Menu.InfoToasts);
+        if (_menu == undefined || _menu.hide_requests > 0 || !_menu.canvas.get_enabled()
+            || _menu.canvas.get_alpha() <= 0) return;
+        var _pending = undefined;
+        if (!_local.entry_pending) _pending = { bugs: _local.pending_bugs, fish: _local.pending_fish };
+        var _text = __MistriaCompanion_local_sightings_report(_pending);
+        if (_text == undefined) {
+            mmapi_warn_rate_limited("mistria_item_details:auto_sightings", "mistria_item_details",
+                "Waiting for local sighting data to show the automatic bug and fish notice.");
+            return;
+        }
+        _local.pending_bugs = {};
+        _local.pending_fish = {};
+        _local.entry_pending = false;
+        if (_text == "") return;
+        _replay = {
+            grid: GRID, visit_key: _local.key, local: _local, automatic: true, text: _text, toast: undefined
+        };
+        _runtime.sightings_replay = _replay;
+    }
+    if (GRID != _replay.grid || __MistriaCompanion_local_visit_key() != _replay.visit_key
+        || _runtime.local_sightings != _replay.local || (_replay.automatic && !_runtime.notifications_enabled))
+    {
+        __MistriaCompanion_retire_sightings_notice(_replay.toast);
         _runtime.sightings_replay = undefined;
         return;
     }
-    if (_replay.toast != undefined && !_replay.toast.freed) return;
-    if (_replay.index >= array_length(_replay.notices)) {
-        _runtime.sightings_replay = undefined;
+    if (_replay.toast != undefined) {
+        if (_replay.toast.freed || _replay.toast.marked_for_death) {
+            _runtime.sightings_replay = undefined;
+        }
         return;
     }
     if (game_paused() || __MistriaCompanion_dig_notice_blocked()) return;
     var _menu = __MistriaCompanion_menu(Menu.InfoToasts);
-    if (_menu == undefined || _menu.hide_requests > 0 || !_menu.canvas.get_enabled()) return;
-    // Use the native toast lifecycle, without piling a whole area's species off-screen.
-    if (!_menu.toasts.is_empty()) return;
-    if (_menu.create_notification(ANCHOR.wrap_for_local(_replay.notices[_replay.index]), 60 * 3)) {
-        _replay.toast = _menu.toasts.last();
-        _replay.toast.set_think_callback(MistriaCompanion_sightings_notice_think,
-            [_replay.toast, _replay.grid, _replay.visit_key]);
-    }
-    _replay.index++;
+    if (_menu == undefined || _menu.hide_requests > 0 || !_menu.canvas.get_enabled()
+        || _menu.canvas.get_alpha() <= 0) return;
+    // Own only this UI node, not the game's FIFO notification queue or its lifetimes.
+    _replay.toast = __MistriaCompanion_create_sightings_notice(_replay.text, _menu);
+    _replay.toast.set_think_callback(MistriaCompanion_sightings_notice_think,
+        [_replay.toast, _replay.local, _replay.automatic]);
 }
 
 function MistriaCompanion_toggle_clock() {
@@ -1470,19 +1612,25 @@ function MistriaCompanion_status_label_think(_label, _vitals) {
             break;
         }
     }
+    var _notices = [];
     var _toasts = __MistriaCompanion_menu(Menu.InfoToasts);
     if (_toasts != undefined) {
         for (var _index = 0; _index < _toasts.toasts.count(); _index++) {
-            var _toast = _toasts.toasts.get(_index);
-            if (_toast.freed || !_toast.get_enabled() || _toast.get_alpha() <= 0) continue;
-            var _position = ANCHOR.get_screen_position(_toast);
-            if (_root_position.x < _position.x + _toast.get_width()
-                && _root_position.x + _size.x > _position.x
-                && _y < _position.y + _toast.get_height() && _y + _size.y > _position.y)
-            {
-                _visible = false;
-                break;
-            }
+            array_push(_notices, _toasts.toasts.get(_index));
+        }
+    }
+    var _replay = __MistriaCompanion_runtime().sightings_replay;
+    if (_replay != undefined && _replay.toast != undefined) array_push(_notices, _replay.toast);
+    for (var _index = 0; _index < array_length(_notices); _index++) {
+        var _toast = _notices[_index];
+        if (_toast.freed || !_toast.get_enabled() || _toast.get_alpha() <= 0) continue;
+        var _position = ANCHOR.get_screen_position(_toast);
+        if (_root_position.x < _position.x + _toast.get_width()
+            && _root_position.x + _size.x > _position.x
+            && _y < _position.y + _toast.get_height() && _y + _size.y > _position.y)
+        {
+            _visible = false;
+            break;
         }
     }
     _label.set_alpha(_visible ? 1 : 0);
@@ -1753,7 +1901,7 @@ function __MistriaCompanion_update_museum_label(_target) {
     if (_plate == undefined) {
         // Keep the name outside the scroller's clipped canvas, without taking input.
         _plate = ANCHOR.nine_slice(_menu.canvas)
-            .set_sprite(spr_ui_tooltip_header_box).set_z(-100);
+            .set_sprite(spr_ui_tooltip_box).set_z(-100);
         var _text = ANCHOR.text(_plate)
             .set_xy(4, 4).set_lut(COMMON_LUT, CommonLutIndex.Header)
             .allow_line_breaks();
@@ -2025,7 +2173,7 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
         if (_group.icon_item >= 0) {
             if (_bug_marker == undefined) {
                 _bug_marker = ANCHOR.sprite(_hub.node).set_xy(-10, -10)
-                    .set_lut(COMMON_LUT).listen_for_hovers();
+                    .listen_for_hovers();
                 _bug_marker.board_set("label", __MistriaCompanion_hover_label(_bug_marker));
                 _hub.node.board_set("mistria_item_details_bug_marker", _bug_marker);
             }
@@ -2034,7 +2182,7 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
                 if (_text != "") _text += "\n";
                 _text += _group.species[_species] + " x" + string(_group.counts[_species]);
             }
-            _bug_marker.set_sprite(ITEM_PROTOTYPES[_group.icon_item].icon_sprite).enable();
+            _bug_marker.set_sprite(ITEM_PROTOTYPES[_group.icon_item].icon_sprite).disable_lut().enable();
             _bug_marker.board_get("label").set_text(_text);
             array_push(_runtime.map_wiki_nodes, {
                 node: _bug_marker,
@@ -3098,7 +3246,7 @@ function MistriaCompanion_tick() {
     }
     MistriaCompanion_update_mounted_interactions();
     MistriaCompanion_update_seed_makers();
-    __MistriaCompanion_update_local_sightings();
+    MistriaCompanion_track_local_spawns();
     MistriaCompanion_replay_local_sightings();
     var _language = local_language();
     if (_runtime.language != _language) {
@@ -3126,15 +3274,11 @@ function MistriaCompanion_tick() {
         _runtime.dig_spot_delay = 0;
         _runtime.dig_spot_notice = undefined;
         _runtime.dig_spots = [];
-        _runtime.mine_bug_floor = "";
-        _runtime.mine_bug_delay = 0;
         _runtime.map_signature = "";
         _runtime.scan_frame = -12;
     }
     if (_runtime.dig_spot_delay >= 0) MistriaCompanion_detect_dig_spots();
     MistriaCompanion_show_dig_spot_notice();
-    if (_runtime.mine_bug_delay >= 0) MistriaCompanion_show_mine_bug_spawns();
-    MistriaCompanion_track_legendary_spawns();
     MistriaCompanion_update_birthday_label();
 
     var _hubs = __MistriaCompanion_map_hubs();
@@ -3166,5 +3310,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.47");
+mmapi_mod_declare("mistria_item_details", "1.0.48");
 MistriaCompanion_register();
