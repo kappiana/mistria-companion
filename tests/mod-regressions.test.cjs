@@ -7,6 +7,24 @@ const vm = require('node:vm');
 const source = readFileSync(join(__dirname, '..', 'MistriaCompanion', 'gml', 'MistriaCompanion.gml'), 'utf8');
 const privateName = name => `__MistriaCompanion_${name}`;
 const publicName = name => `MistriaCompanion_${name}`;
+const configurationDefaults = {
+  bug_alerts_enabled: false,
+  bug_markers_enabled: true,
+  diving_spot_alerts_enabled: false,
+  mist_spot_markers_enabled: true,
+  dig_spot_alerts_enabled: false,
+  dig_spot_markers_enabled: true,
+  legendary_fish_alerts_enabled: false,
+};
+const alertPreferenceFunctions = [
+  'configuration_options', 'sighting_alerts_enabled', 'any_alerts_enabled', 'apply_alert_preferences',
+].map(privateName);
+
+test('v51 manifest and MMAPI registration declare the same version', () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, '..', 'MistriaCompanion', 'manifest.json'), 'utf8'));
+  assert.equal(manifest.version, '1.0.51');
+  assert.ok(source.includes(`mmapi_mod_declare("mistria_item_details", "${manifest.version}");`));
+});
 
 // Execute actual function source, translating only GML struct access and typeof.
 // JS functions stand in for GML methods; method() saves/restores VM self so nested
@@ -1441,10 +1459,12 @@ function mountedConfigHarness(config) {
   const registrations = [];
   const warnings = [];
   const context = load([
+    ...alertPreferenceFunctions,
     privateName('runtime'), privateName('preference'), privateName('mounted_setting'),
     privateName('save_preferences'),
     privateName('hotkey_actions'), privateName('register_hotkeys'), publicName('reset_save'),
     publicName('toggle_wiki_hints'), publicName('toggle_all_bug_markers'), publicName('toggle_notifications'),
+    publicName('toggle_configuration'),
   ], {
     global: {},
     ...Object.fromEntries(hotkeyCallbacks.map(name => [publicName(name), () => name])),
@@ -1527,7 +1547,8 @@ test('mounted config preserves custom primary and alternate keybindings while wr
   register();
   assert.deepEqual(config, before, 'registration does not mutate the loaded config');
   assert.deepEqual({ ...writes[0][2] }, {
-    ...before, notifications_enabled: false, all_bug_markers_enabled: true, wiki_hints_enabled: true,
+    ...before, ...configurationDefaults,
+    notifications_enabled: false, all_bug_markers_enabled: true, wiki_hints_enabled: true,
   });
   assert.equal(reads.length, 1);
   assert.equal(writes.length, 1);
@@ -1673,6 +1694,135 @@ test('saving preferences preserves current bindings and mounted configuration an
   assert.equal(preferenceSessionHarness(store).runtime.all_bug_markers_enabled, true);
 });
 
+function configurationPopupStub() {
+  return {
+    hide_requests: 0,
+    mistria_configuration_status: { set_text(text) { this.text = text; return this; } },
+  };
+}
+
+test('v51 exposes the requested independent switches plus legendary fish alerts', () => {
+  const h = preferenceSessionHarness({});
+  const options = Array.from(h.context.__MistriaCompanion_configuration_options());
+  assert.deepEqual(options.map(option => option.key), Object.keys(configurationDefaults));
+  assert.deepEqual(options.map(option => option.title), [
+    'Show bug alerts', 'Show bugs on the map', 'Show dive spot alerts',
+    'Show mist spots on the map', 'Show dig spot alerts', 'Show dig spots on the map',
+    'Show legendary fish alerts',
+  ]);
+  assert.equal(options.filter(option => option.alert).length, 4);
+});
+
+test('v51 migrates legacy alerts without overwriting explicit category choices or existing key remaps', () => {
+  for (const enabled of [true, false]) {
+    const store = { value: {
+      __config_version: 1, notifications_enabled: enabled,
+      bug_alerts_enabled: !enabled, bug_markers_enabled: false,
+      all_bug_markers_enabled: false, wiki_hints_enabled: false,
+      wiki: 'F11', notifications: 'HOME', notifications_alternate: 'SHIFT+HOME',
+    } };
+    const h = preferenceSessionHarness(store);
+    assert.equal(h.runtime.bug_alerts_enabled, !enabled, 'an explicit v51 value takes priority');
+    for (const key of ['legendary_fish_alerts_enabled', 'diving_spot_alerts_enabled', 'dig_spot_alerts_enabled']) {
+      assert.equal(h.runtime[key], enabled, `${key} inherits the legacy F10 choice`);
+      assert.equal(store.value[key], enabled);
+    }
+    assert.equal(h.runtime.bug_markers_enabled, false);
+    assert.equal(h.runtime.dig_spot_markers_enabled, true);
+    assert.equal(h.runtime.mist_spot_markers_enabled, true);
+    assert.equal(h.runtime.all_bug_markers_enabled, false);
+    assert.equal(h.runtime.wiki_hints_enabled, false);
+    assert.equal(store.value.wiki, 'F11');
+    assert.equal(store.value.notifications, 'HOME');
+    assert.equal(store.value.notifications_alternate, 'SHIFT+HOME');
+    const reloaded = preferenceSessionHarness(store);
+    for (const key of Object.keys(configurationDefaults)) assert.equal(reloaded.runtime[key], h.runtime[key]);
+  }
+});
+
+test('all v51 switches validate boolean input and immediately persist independently across saves and sessions', () => {
+  for (const [key, defaultValue] of Object.entries(configurationDefaults)) {
+    for (const invalid of ['true', 'false', 0, 1, {}, []]) {
+      const h = preferenceSessionHarness({ value: { __config_version: 1, [key]: invalid } });
+      assert.equal(h.runtime[key], defaultValue);
+      assert.ok(h.warnings.some(([, message]) => message.includes(`Invalid ${key}`)));
+    }
+    const store = {};
+    const h = preferenceSessionHarness(store);
+    const popup = configurationPopupStub();
+    const before = structuredClone(store.value);
+    h.context.MistriaCompanion_toggle_configuration(popup, key);
+    for (const other of Object.keys(configurationDefaults)) {
+      assert.equal(h.runtime[other], other === key ? !defaultValue : configurationDefaults[other]);
+      assert.equal(store.value[other], h.runtime[other]);
+      assert.equal(typeof store.value[other], 'boolean');
+    }
+    assert.equal(store.value.wiki, before.wiki);
+    assert.equal(store.value.all_bug_markers_enabled, before.all_bug_markers_enabled);
+    assert.equal(store.value.mounted_interactions_enabled, before.mounted_interactions_enabled);
+    assert.equal(popup.mistria_configuration_status.text, 'Changes saved automatically.');
+    h.context.MistriaCompanion_reset_save({});
+    assert.equal(h.runtime[key], !defaultValue);
+    const reloaded = preferenceSessionHarness(store);
+    assert.equal(reloaded.runtime[key], !defaultValue);
+    reloaded.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), key);
+    assert.equal(store.value[key], defaultValue);
+  }
+});
+
+test('F10 toggles all alert categories together for every combination without changing any map preferences', () => {
+  const keys = ['bug_alerts_enabled', 'legendary_fish_alerts_enabled',
+    'diving_spot_alerts_enabled', 'dig_spot_alerts_enabled'];
+  for (let mask = 0; mask < 16; mask++) {
+    const store = { value: { __config_version: 1, ...configurationDefaults,
+      bug_markers_enabled: false, dig_spot_markers_enabled: false, all_bug_markers_enabled: false,
+      ...Object.fromEntries(keys.map((key, index) => [key, !!(mask & (1 << index))])),
+    } };
+    const h = preferenceSessionHarness(store);
+    h.context.MistriaCompanion_toggle_notifications();
+    for (const key of keys) assert.equal(store.value[key], mask === 0);
+    assert.equal(store.value.notifications_enabled, mask === 0);
+    assert.equal(store.value.bug_markers_enabled, false);
+    assert.equal(store.value.dig_spot_markers_enabled, false);
+    assert.equal(store.value.mist_spot_markers_enabled, true);
+    assert.equal(store.value.all_bug_markers_enabled, false);
+    h.context.MistriaCompanion_toggle_notifications();
+    for (const key of keys) assert.equal(store.value[key], mask !== 0);
+  }
+});
+
+test('F9 keeps its ordinary-species filter without overriding the all-bugs visibility switch', () => {
+  const store = { value: { __config_version: 1, bug_markers_enabled: false, all_bug_markers_enabled: false } };
+  const h = preferenceSessionHarness(store);
+  h.context.MistriaCompanion_toggle_all_bug_markers();
+  assert.equal(h.runtime.all_bug_markers_enabled, true);
+  assert.equal(h.runtime.bug_markers_enabled, false);
+  assert.equal(store.value.bug_markers_enabled, false);
+  assert.match(h.feedback.at(-1), /bug map display is off/);
+});
+
+test('configuration reports save failures and rejects unknown or inactive-menu toggles without changing other values', () => {
+  const store = {};
+  const h = preferenceSessionHarness(store);
+  const popup = configurationPopupStub();
+  store.failWrites = true;
+  h.context.MistriaCompanion_toggle_configuration(popup, 'bug_markers_enabled');
+  assert.equal(h.runtime.bug_markers_enabled, false);
+  assert.equal(store.value.bug_markers_enabled, true);
+  assert.match(popup.mistria_configuration_status.text, /Not saved.*only this session/);
+  assert.ok(h.warnings.some(([, message]) => /could not be saved/.test(message)));
+  const writes = h.writes.length;
+  h.context.MistriaCompanion_toggle_configuration(popup, 'not_a_setting');
+  assert.ok(h.warnings.some(([, message]) => /Unknown configuration option/.test(message)));
+  for (const inactive of ['close_requested', 'free_requested', 'hide_requests']) {
+    popup[inactive] = 1;
+    h.context.MistriaCompanion_toggle_configuration(popup, 'bug_markers_enabled');
+    popup[inactive] = 0;
+  }
+  assert.equal(h.writes.length, writes);
+  assert.equal(h.runtime.bug_markers_enabled, false);
+});
+
 test('legendary fish tracking returns new observations without emitting separate notices', () => {
   const runtime = { notifications_enabled: false, legendary_day: '1', legendary_sightings: [],
     seen_spawns: {} };
@@ -1701,7 +1851,7 @@ test('legendary fish tracking returns new observations without emitting separate
 });
 
 function localSightingsHarness(priorCatches = []) {
-  const runtime = { notifications_enabled: false, all_bug_markers_enabled: false, legendary_day: '1',
+  const runtime = { ...configurationDefaults, notifications_enabled: false, all_bug_markers_enabled: false, legendary_day: '1',
     legendary_sightings: ['Very Rare Bug: Snowball Beetle - Western Ruins'], seen_spawns: {} };
   const state = { day: 1, room: 'town', ready: true, paused: false, cutscene: false, screenHeight: 270,
     traveling: false };
@@ -1770,9 +1920,10 @@ function localSightingsHarness(priorCatches = []) {
     'collect_local_bug', 'collect_local_fish', 'local_species_rows', 'local_sightings_report',
     'dig_spot_location_name', 'size_sightings_notice', 'create_sightings_notice',
     'sightings_transition_active', 'retire_sightings_notice',
+    'configuration_options', 'sighting_alerts_enabled', 'any_alerts_enabled', 'apply_alert_preferences',
   ].map(privateName).concat([
     'show_local_sightings', 'replay_local_sightings', 'sightings_notice_think',
-    'reset_local_sightings', 'floor_built', 'reset_save', 'track_local_spawns',
+    'reset_local_sightings', 'floor_built', 'reset_save', 'track_local_spawns', 'toggle_configuration',
   ].map(publicName)), {
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_legendary_day_key: () => String(state.day),
@@ -1780,6 +1931,7 @@ function localSightingsHarness(priorCatches = []) {
     __MistriaCompanion_name: item => item.name,
     __MistriaCompanion_location_name: id => ['Town', 'Western Ruins', 'The Mines'][id],
     __MistriaCompanion_notify: text => feedback.push(text),
+    __MistriaCompanion_save_preferences: () => true,
     __MistriaCompanion_text_popup: () => assert.fail('F6 must never create a modal popup'),
     popup_creator: () => assert.fail('F6 must never acquire a menu pilot or pause the game'),
     __MistriaCompanion_dig_notice_blocked: () => state.cutscene,
@@ -1852,6 +2004,12 @@ function localSightingsHarness(priorCatches = []) {
   sync();
   return { context, runtime, state, actors, notices, toasts, toastMenu, expire, replay,
     feedback, warnings, keys, items, sync, report, show, bug, catchBug, track, advance, nativeToasts, nativeNotice };
+}
+
+function setSightingsAlerts(h, enabled) {
+  Object.assign(h.runtime, {
+    bug_alerts_enabled: enabled, legendary_fish_alerts_enabled: enabled, notifications_enabled: enabled,
+  });
 }
 
 test('F6 includes ordinary, rare, and very rare local bugs, even with map markers and alerts off', () => {
@@ -2177,7 +2335,7 @@ test('leaving an area cancels pending F6 notices and hides a stale visible sight
 
 test('automatic entry notice combines every bug rarity, counts, and legendary fish exactly like F6', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.runtime.legendary_sightings = [];
   h.bug(0);
   h.bug(1);
@@ -2209,7 +2367,7 @@ test('automatic sightings remain quiet by default and enabling alerts does not r
   h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
   h.advance(30);
   assert.equal(h.notices.length, 0);
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.advance(30);
   assert.equal(h.notices.length, 0);
   h.bug(2);
@@ -2219,9 +2377,78 @@ test('automatic sightings remain quiet by default and enabling alerts does not r
     'enabling alerts mid-visit permits new-species updates, not a replay of the entry list');
 });
 
+test('bug and fish alerts independently filter automatic entry and update reports but never manual F6', () => {
+  for (const bugs of [false, true]) {
+    for (const fish of [false, true]) {
+      const h = localSightingsHarness();
+      Object.assign(h.runtime, { bug_alerts_enabled: bugs, legendary_fish_alerts_enabled: fish,
+        notifications_enabled: false, dig_spot_alerts_enabled: true, diving_spot_alerts_enabled: true });
+      h.bug(0);
+      h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
+      h.advance();
+      assert.equal(h.notices.length, bugs || fish ? 1 : 0, 'legacy summary flag is not a master gate');
+      if (bugs || fish) {
+        assert.equal(h.notices[0].text.includes('Butterfly'), bugs);
+        assert.equal(h.notices[0].text.includes('Legendary fish'), fish);
+      }
+      h.expire();
+      h.bug(2);
+      h.advance();
+      assert.equal(h.notices.filter(notice => notice.text === 'Moth: 1').length, bugs ? 1 : 0);
+      h.expire();
+      h.show();
+      assert.match(h.notices.at(-1).text, /Butterfly/);
+      assert.match(h.notices.at(-1).text, /Legendary fish/);
+    }
+  }
+});
+
+test('disabling one sighting category cancels only its pending entries and retires stale combined toasts', () => {
+  const h = localSightingsHarness();
+  setSightingsAlerts(h, true);
+  h.state.cutscene = true;
+  h.bug(0);
+  h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
+  h.advance();
+  h.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), 'bug_alerts_enabled');
+  assert.equal(Object.keys(h.runtime.local_sightings.pending_bugs).length, 0);
+  assert.equal(Object.keys(h.runtime.local_sightings.pending_fish).length, 1);
+  h.state.cutscene = false;
+  h.advance();
+  assert.doesNotMatch(h.notices[0].text, /Butterfly/);
+  assert.match(h.notices[0].text, /Legendary fish/);
+  const automatic = h.toasts[0];
+  h.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), 'legendary_fish_alerts_enabled');
+  assert.equal(automatic.freed, true);
+  assert.equal(h.runtime.sightings_replay, undefined);
+  h.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), 'bug_alerts_enabled');
+  h.advance(30);
+  assert.equal(h.notices.length, 1, 'old sightings do not replay when the category is re-enabled');
+  h.show();
+  const manual = h.toasts.at(-1);
+  h.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), 'bug_alerts_enabled');
+  assert.equal(manual.freed, false, 'configuration switches never retire an explicit F6 report');
+});
+
+test('changing dig, dive, or map switches does not interrupt a visible automatic bug notice', () => {
+  const h = localSightingsHarness();
+  setSightingsAlerts(h, true);
+  h.bug(0);
+  h.advance();
+  const replay = h.runtime.sightings_replay;
+  for (const key of ['dig_spot_alerts_enabled', 'diving_spot_alerts_enabled',
+    'bug_markers_enabled', 'dig_spot_markers_enabled', 'mist_spot_markers_enabled']) {
+    h.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), key);
+    assert.equal(h.runtime.sightings_replay, replay);
+    h.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), key);
+    assert.equal(h.runtime.sightings_replay, replay);
+    assert.equal(h.toasts[0].freed, false);
+  }
+});
+
 test('automatic bug summaries repeat for new species, not catches, duplicates, or grid node changes', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   const first = h.bug(0);
   h.advance();
   h.expire();
@@ -2242,7 +2469,7 @@ test('automatic bug summaries repeat for new species, not catches, duplicates, o
 
 test('mine-floor bug notices use the combined renderer and include species revealed later', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.context.CURRENT_LOCATION_ID = 2;
   const runner = { current_floor: 95, current_level: () => ({ impl: 'ruins' }) };
   h.context.DUNGEON_RUNNER = runner;
@@ -2277,7 +2504,7 @@ test('automatic entry detection resets on every visit boundary and save load', (
     h => h.context.MistriaCompanion_reset_save({}),
   ]) {
     const h = localSightingsHarness();
-    h.runtime.notifications_enabled = true;
+    setSightingsAlerts(h, true);
     h.bug(0);
     h.advance();
     h.expire();
@@ -2289,7 +2516,7 @@ test('automatic entry detection resets on every visit boundary and save load', (
 
 test('automatic notices wait for menus and cutscenes but not unrelated native notifications', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   const first = h.bug(0);
   const despawned = h.bug(1);
   const existing = h.nativeNotice();
@@ -2318,7 +2545,7 @@ test('automatic notices wait for menus and cutscenes but not unrelated native no
 
 test('the old area cannot create an entry notice between transition hooks and actual arrival', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.bug(0);
   h.advance();
   h.expire();
@@ -2345,7 +2572,7 @@ test('the old area cannot create an entry notice between transition hooks and ac
 
 test('departing retires only the companion notice without changing the native notification queue', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.bug(0);
   h.advance();
   const toast = h.toasts[0];
@@ -2366,7 +2593,7 @@ test('departing retires only the companion notice without changing the native no
 
 test('automatic notices coalesce discoveries while a notice is visible or pending', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.bug(0);
   h.advance();
   h.bug(1);
@@ -2385,7 +2612,7 @@ test('automatic notices coalesce discoveries while a notice is visible or pendin
 
 test('F6 consumes a pending automatic summary and remains available with alerts off', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.bug(0);
   h.advance(3);
   h.show();
@@ -2394,7 +2621,7 @@ test('F6 consumes a pending automatic summary and remains available with alerts 
   h.expire();
   h.advance(30);
   assert.equal(h.notices.length, 1);
-  h.runtime.notifications_enabled = false;
+  setSightingsAlerts(h, false);
   h.bug(2);
   h.show();
   h.toasts[0].think();
@@ -2404,7 +2631,7 @@ test('F6 consumes a pending automatic summary and remains available with alerts 
 
 test('empty areas and uncaught despawns never create an automatic no-sightings notice', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.advance(30);
   assert.equal(h.notices.length, 0);
   h.state.cutscene = true;
@@ -2422,7 +2649,7 @@ test('empty areas and uncaught despawns never create an automatic no-sightings n
 test('catching every pending bug cancels deferred entry and new-species notices', () => {
   for (const afterEmptyEntry of [false, true]) {
     const h = localSightingsHarness();
-    h.runtime.notifications_enabled = true;
+    setSightingsAlerts(h, true);
     if (afterEmptyEntry) h.advance();
     h.state.cutscene = true;
     const bug = h.bug(0);
@@ -2439,7 +2666,7 @@ test('catching every pending bug cancels deferred entry and new-species notices'
 
 test('new-species updates after an empty entry are compact and exclude catches while deferred', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.context.CURRENT_LOCATION_ID = 2;
   h.context.DUNGEON_RUNNER = { current_floor: 95, current_level: () => ({ impl: 'ruins' }) };
   h.advance();
@@ -2462,7 +2689,7 @@ test('new-species updates after an empty entry are compact and exclude catches w
 
 test('leaving or disabling alerts discards pending automatic notices and hides visible ones', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.state.cutscene = true;
   h.bug(0);
   h.advance();
@@ -2473,15 +2700,15 @@ test('leaving or disabling alerts discards pending automatic notices and hides v
   assert.equal(h.notices.length, 0);
   h.bug(1);
   h.advance(3);
-  h.runtime.notifications_enabled = false;
+  setSightingsAlerts(h, false);
   h.advance();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.advance(30);
   assert.equal(h.notices.length, 0, 're-enabling does not revive a disabled pending report');
   h.bug(2);
   h.advance();
   assert.equal(h.notices.length, 1);
-  h.runtime.notifications_enabled = false;
+  setSightingsAlerts(h, false);
   h.toasts[0].think();
   assert.equal(h.toasts[0].alpha, 0);
   h.replay();
@@ -2490,7 +2717,7 @@ test('leaving or disabling alerts discards pending automatic notices and hides v
 
 test('automatic combined notices use the same bounded native pagination as F6', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.state.screenHeight = 200;
   h.context.BUGS.get = () => ({ rarity: 'common' });
   for (let i = 0; i < 24; i++) {
@@ -2511,7 +2738,7 @@ test('automatic combined notices use the same bounded native pagination as F6', 
 
 test('legendary fish still trigger a combined notice once per species and location per day', () => {
   const h = localSightingsHarness();
-  h.runtime.notifications_enabled = true;
+  setSightingsAlerts(h, true);
   h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
   h.advance();
   assert.equal(h.notices[0].text, 'Legendary fish - Legendary Fish: 1 active');
@@ -4289,32 +4516,75 @@ test('museum wiki hints can be disabled without hiding names or changing registe
 });
 
 function settingsHarness() {
+  function newPilot() {
+    return {
+      map: [[]], neighbors: {}, newline: false,
+      add(node) {
+        if (this.newline) this.map.push([]);
+        this.newline = false;
+        this.map.at(-1).push(node);
+      },
+      request_newline() { this.newline = true; },
+      set_neighbor(other, direction) { this.neighbors[direction] = other; return this; },
+      reset() { this.map = [[]]; this.newline = false; },
+    };
+  }
   class SettingsNode extends Node {
     constructor(width = 170, height = 24) {
       super();
-      Object.assign(this, { width, height, unlocked: true });
+      Object.assign(this, { width, height, unlocked: true, text: '' });
     }
     set_sprites_from_key(key) { this.style = key; return this; }
     set_align() { return this; }
+    set_width(width) { this.width = width; return this; }
+    set_height(height) { this.height = height; return this; }
+    set_y(y) { this.y = y; return this; }
     set_max_width(width) { this.maxWidth = width; return this; }
     allow_line_breaks() { return this; }
     get_width() { return this.width; }
     get_height() { return this.height; }
+    get_text() { return this.text; }
+    add_text_label(label) { this.label = label; return this; }
+    add_hover_outline() { return this; }
+    add_to_pilot(pilot, newline = false) {
+      this.pilot = pilot;
+      pilot.add(this);
+      if (newline) pilot.request_newline();
+      return this;
+    }
+    set_tap_callback(callback, args) { this.tap = () => callback(...args); return this; }
+    set_free_callback(callback, args) { this.onFree = () => callback(...args); return this; }
     is_unlocked() { return this.unlocked; }
     measure() {
       // Deterministic layout stand-in, not the game's font metrics.
       const columns = Math.max(1, Math.floor((this.maxWidth ?? this.width) / 6));
       this.height = this.text.split('\n').reduce((sum, line) =>
         sum + Math.max(1, Math.ceil(line.length / columns)), 0) * 10;
+      return { x: this.maxWidth ?? this.width, y: this.height };
     }
   }
-  const runtime = {};
+  function node(parent) {
+    const child = new SettingsNode();
+    child.parent = parent;
+    parent?.children.push(child);
+    return child;
+  }
+  function free(node) {
+    node.freed = true;
+    node.onFree?.();
+    for (const child of node.children) free(child);
+  }
+  const runtime = { ...configurationDefaults };
+  const screen = { x: 480, y: 270 };
+  const popups = [];
+  const saved = [];
   const menu = {
     journal: { right_full_body: new SettingsNode(185, 211) },
     hide_requests: 0,
     active_page: undefined,
     option_scroller: undefined,
-    category_pilot: {},
+    category_pilot: newPilot(),
+    new_pilot: newPilot,
   };
   let pilot = menu.category_pilot;
   const created = [];
@@ -4323,29 +4593,76 @@ function settingsHarness() {
     'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications', 'show_farm_status',
   ];
   const context = load([
+    ...alertPreferenceFunctions,
     privateName('hotkey_actions'), privateName('keybind_names'),
     privateName('settings_keybind_row'), publicName('update_settings_keybinds'),
+    ...['show_configuration', 'toggle_configuration', 'configuration_row_think',
+      'configuration_button_free'].map(publicName),
   ], {
     ...Object.fromEntries(callbacks.map(name => [publicName(name), () => name])),
     __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_save_preferences: () => { saved.push({ ...runtime }); return true; },
+    mmapi_log_warn: () => assert.fail('unexpected configuration warning'),
     __MistriaCompanion_menu: () => menu.close_requested ? undefined : menu,
     Menu: { Settings: 'settings' },
     Align: { Center: 0, Middle: 0 },
+    Cardinal: { North: 'north', South: 'south', East: 'east', West: 'west' },
     COMMON_LUT: 0,
     CommonLutIndex: { Dark: 0, Header: 1 },
     ON_GAMEPAD: false,
     INPUT: { gp_right_stick: { y: 0 } },
     string_replace_all: (text, from, to) => text.split(from).join(to),
     ANCHOR: {
-      text: parent => { const node = new SettingsNode(); parent.children.push(node); return node; },
+      text: node, nine_slice: node, positional: node, free_node: free,
+      wrap_for_local: text => text,
+      get_true_size: () => screen,
       get_active_pilot: () => pilot,
+      set_active_pilot: value => { pilot = value; },
     },
-    create_scroller: () => {
+    popup_creator: () => {
+      const popup = {
+        backplate: new SettingsNode(180, 0), pilot: newPilot(), new_pilot: newPilot,
+        hide_requests: 0, close_requested: false, free_requested: false,
+        add_title(title) {
+          this.title = title;
+          this.header = node(this.backplate).set_width(this.backplate.width - 30).set_xy(0, 8);
+          this.header.set_text(title).measure();
+          this.header.height += 4;
+        },
+        add_description(text) {
+          this.body = node(this.backplate).set_width(this.backplate.width - 20);
+          this.body_text = node(this.body).set_text(text);
+        },
+        create_button(label) {
+          this.closeButton = node(this.backplate).add_to_pilot(this.pilot);
+          this.closeButton.label = label;
+        },
+        refresh_backplate_height() {
+          this.backplate.height = 50 + this.header.height + this.header.y + this.body.height;
+        },
+        spawn() {
+          this.previousPilot = pilot;
+          pilot = this.pilot;
+          menu.option_scroller.canvas.unlocked = false;
+          popups.push(this);
+        },
+        close() {
+          this.close_requested = true;
+          pilot = this.previousPilot;
+          menu.option_scroller.canvas.unlocked = true;
+        },
+      };
+      return popup;
+    },
+    create_scroller: parent => {
       const scroller = {
-        canvas: new SettingsNode(170, 211),
+        canvas: node(parent).set_size(parent.width - 15, parent.height),
+        parent, view_height: parent.height,
         rows: [], bottom: 0, scroll: 0,
+        subscribe_to_pilot(pilot) { this.pilot = pilot; return this; },
+        scroll_with_stick() { this.stick = true; return this; },
         new_element(height) {
-          const row = new SettingsNode(170, height);
+          const row = node(this.canvas).set_size(this.canvas.width, height);
           row.y = this.bottom;
           this.bottom += height - 1;
           this.rows.push(row);
@@ -4357,7 +4674,7 @@ function settingsHarness() {
           for (const next of this.rows.slice(this.rows.indexOf(row) + 1)) next.y += amount;
         },
         scroll_by_amount(amount) { this.scroll += amount; },
-        free() { this.canvas.freed = true; },
+        free() { free(this.canvas); },
       };
       created.push(scroller);
       return scroller;
@@ -4368,7 +4685,7 @@ function settingsHarness() {
     title: action.title, bindings: [action.default_key],
   }));
   return {
-    context, runtime, menu, created, actions,
+    context, runtime, menu, created, actions, screen, popups, saved,
     update: context.MistriaCompanion_update_settings_keybinds,
     setPilot: value => { pilot = value; },
   };
@@ -4382,14 +4699,18 @@ test('Settings reference uses all seven registered actions and does not duplicat
   update();
   assert.equal(created.length, 1);
   const first = menu.option_scroller;
-  assert.equal(first.rows.length, 9);
+  assert.equal(first.rows.length, 10);
   assert.equal(first.rows[0].children[0].text, 'Mistria Companion');
-  assert.deepEqual(first.rows.slice(1, 8).map(row => row.children[0].text), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4']);
-  assert.deepEqual(first.rows.slice(1, 8).map(row => row.children[1].text), runtime.keybind_rows.map(row => row.title));
-  assert.ok(first.rows[6].y + first.rows[6].height <= 211, 'default shortcuts fit in the page in the layout fixture');
+  assert.equal(first.rows[1].children[0].label, 'Configuration');
+  assert.deepEqual(first.rows.slice(2, 9).map(row => row.children[0].text), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4']);
+  assert.deepEqual(first.rows.slice(2, 9).map(row => row.children[1].text), runtime.keybind_rows.map(row => row.title));
+  assert.ok(first.rows[1].y + first.rows[1].height <= 211, 'configuration stays above every shortcut');
+  const configurationPilot = menu.mistria_configuration_pilot;
+  assert.equal(configurationPilot.map[0].length, 1);
 
   // This is the native SettingsMenu category/back lifecycle.
   first.free();
+  assert.equal(configurationPilot.map[0].length, 0, 'native category changes remove stale companion buttons');
   const nativeOptions = { canvas: new Node() };
   menu.option_scroller = nativeOptions;
   menu.active_page = 'controls';
@@ -4403,6 +4724,8 @@ test('Settings reference uses all seven registered actions and does not duplicat
   update();
   assert.equal(created.length, 2);
   assert.notEqual(menu.option_scroller, first);
+  assert.equal(menu.mistria_configuration_pilot, configurationPilot);
+  assert.equal(configurationPilot.map[0].length, 1, 'returning to Settings does not accumulate stale pilot nodes');
   menu.close_requested = true;
   menu.option_scroller.free();
   update();
@@ -4416,11 +4739,11 @@ test('Settings reference renders alternates and unbound actions with expanding, 
   runtime.keybind_rows[4].bindings = ['GAMEPAD_LEFT_SHOULDER+GAMEPAD_RIGHT_TRIGGER'];
   update();
   const rows = menu.option_scroller.rows;
-  assert.equal(rows[3].children[0].text, 'HOME\nSHIFT + F7');
-  assert.equal(rows[4].children[0].text, 'Not bound');
-  assert.equal(rows[5].children[0].text, 'PAD LEFT SHOULDER + PAD RIGHT TRIGGER');
-  assert.ok(rows[5].height > 24);
-  for (const row of rows.slice(1, 8)) {
+  assert.equal(rows[4].children[0].text, 'HOME\nSHIFT + F7');
+  assert.equal(rows[5].children[0].text, 'Not bound');
+  assert.equal(rows[6].children[0].text, 'PAD LEFT SHOULDER + PAD RIGHT TRIGGER');
+  assert.ok(rows[6].height > 24);
+  for (const row of rows.slice(2, 9)) {
     for (const label of row.children) assert.ok(label.height + 8 <= row.height);
   }
   for (let i = 1; i < rows.length; i++) {
@@ -4447,6 +4770,76 @@ test('Settings reference scrolls with the right stick only when its landing page
   menu.option_scroller.canvas.unlocked = false;
   update();
   assert.equal(menu.option_scroller.scroll, 3);
+});
+
+test('Configuration button opens a native popup above the keybinds with saved, live On/Off switches', () => {
+  const h = settingsHarness();
+  h.update();
+  const button = h.menu.option_scroller.rows[1].children[0];
+  assert.equal(button.label, 'Configuration');
+  assert.equal(h.menu.category_pilot.neighbors.east, button.pilot);
+  assert.equal(button.pilot.neighbors.west, h.menu.category_pilot);
+  h.setPilot(button.pilot);
+  button.tap();
+  const popup = h.popups[0];
+  assert.equal(popup.title, 'Mistria Companion configuration');
+  assert.equal(popup.closeButton.label, 'misc_local/close');
+  const list = h.created[1];
+  assert.equal(list.rows.length, 7);
+  assert.equal(list.pilot, h.context.ANCHOR.get_active_pilot());
+  assert.notEqual(list.pilot, popup.closeButton.pilot, 'the scroller never follows a button outside its canvas');
+  assert.deepEqual(list.pilot.map.map(row => row.length), Array(7).fill(1),
+    'switches use native vertical pilot rows rather than a single horizontal row');
+  assert.equal(list.pilot.neighbors.south, popup.closeButton.pilot);
+  assert.equal(popup.closeButton.pilot.neighbors.north, list.pilot);
+  assert.equal(list.stick, true);
+  for (const [index, [key, value]] of Object.entries(configurationDefaults).entries()) {
+    const toggle = list.rows[index].children[0];
+    const valueLabel = toggle.children[1];
+    assert.equal(valueLabel.text, value ? 'On' : 'Off');
+    toggle.tap();
+    valueLabel.think();
+    assert.equal(valueLabel.text, value ? 'Off' : 'On');
+    assert.equal(h.saved.at(-1)[key], !value);
+    h.runtime[key] = value;
+    valueLabel.think();
+    assert.equal(valueLabel.text, value ? 'On' : 'Off', 'hotkey changes are reflected while the popup is open');
+  }
+  button.tap();
+  assert.equal(h.popups.length, 1, 'do not stack configuration popups');
+  popup.close();
+  assert.equal(h.context.ANCHOR.get_active_pilot(), button.pilot);
+  button.tap();
+  assert.equal(h.popups.length, 2, 'closing returns to the same Settings landing page');
+  assert.equal(h.menu.active_page, undefined);
+});
+
+test('configuration layout preserves every row and keeps the viewport and failure status inside small screens', () => {
+  for (const [width, height] of [[480, 270], [400, 240], [320, 200]]) {
+    const h = settingsHarness();
+    Object.assign(h.screen, { x: width, y: height });
+    h.update();
+    h.menu.option_scroller.rows[1].children[0].tap();
+    const popup = h.popups[0];
+    const list = h.created[1];
+    assert.ok(popup.backplate.width <= width - 20);
+    assert.ok(popup.backplate.height <= height - 16);
+    assert.equal(list.view_height, list.parent.height, 'never resize the root after native scroller construction');
+    assert.ok(list.view_height > 0);
+    assert.ok(list.parent.y + list.view_height <= popup.mistria_configuration_status.y);
+    assert.ok(popup.mistria_configuration_status.y + popup.mistria_configuration_status.height <= popup.body.height);
+    for (const row of list.rows) {
+      const toggle = row.children[0];
+      const title = toggle.children[0];
+      const value = toggle.children[1];
+      assert.ok(title.y + title.height <= toggle.height);
+      assert.ok(title.x + title.maxWidth < value.x);
+      assert.ok(toggle.y + toggle.height <= row.height);
+    }
+    h.context.__MistriaCompanion_save_preferences = () => false;
+    list.rows[0].children[0].tap();
+    assert.match(popup.mistria_configuration_status.text, /Not saved.*only this session/);
+  }
 });
 
 test('Mist Spot lookup reads the active index, including zero, and rejects invalid saved positions', () => {
@@ -4551,6 +4944,7 @@ test('Mist Spot rendering preserves a continuous one-artwork-pixel outline despi
 
 test('Mist Spots appear in unvisited map areas, link to the wiki, and follow consumption and daily changes', () => {
   const runtime = {
+    ...configurationDefaults,
     all_bug_markers_enabled: false, notifications_enabled: false,
     map_menu: { selected_location_id: 1, hide_requests: 0, map: new Node().set_size(200, 150) },
     map_wiki_nodes: [], map_signature: '', dig_spot_visit_key: '', dig_spots: [],
@@ -4646,6 +5040,15 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   assert.equal(context.MIST_SIGHT_ACTIVE_INDEX, 0, 'revealing does not consume the spot');
   refresh();
   assert.equal(queueCount, 1, 'unchanged snapshots do not rebuild markers');
+  runtime.mist_spot_markers_enabled = false;
+  refresh();
+  assert.equal(marker.enabled, false);
+  assert.equal(marker.board_get('label').alpha, 0);
+  assert.equal(runtime.map_wiki_nodes.length, 0, 'disabled mist markers cannot offer stale wiki links');
+  runtime.mist_spot_markers_enabled = true;
+  refresh();
+  assert.equal(marker.enabled, true);
+  assert.equal(hubs[0].node.board_get('mistria_item_details_mist_marker'), marker);
   runtime.map_signature = '';
   refresh();
   assert.equal(marker.board_get('cloud'), cloud);
@@ -4693,6 +5096,7 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
 
 test('map markers group bug species and counts while preserving native-size hover-only dig markers', () => {
   const runtime = {
+    ...configurationDefaults,
     all_bug_markers_enabled: true, map_menu: { selected_location_id: 0 },
     map_wiki_nodes: [], map_signature: '', dig_spot_visit_key: 'visit',
     dig_spots: [{ x: 10, y: 10, grid_x: 1, grid_y: 1 }, { x: 12, y: 10, grid_x: 2, grid_y: 1 }],
@@ -4745,6 +5149,24 @@ test('map markers group bug species and counts while preserving native-size hove
   assert.equal(dig.board_get('label').alpha, 1);
   refresh();
   assert.equal(destroyed, 1, 'unchanged maps reuse their snapshot');
+  runtime.bug_markers_enabled = false;
+  refresh();
+  assert.equal(bug.enabled, false, 'the bug switch hides very rare species as well as ordinary ones');
+  assert.equal(dig.enabled, true, 'bug visibility does not affect dig markers');
+  assert.equal(bug.board_get('label').alpha, 0);
+  assert.equal(runtime.map_wiki_nodes.length, 0, 'disabled bugs leave no stale wiki targets');
+  runtime.dig_spot_markers_enabled = false;
+  refresh();
+  assert.equal(dig.enabled, false);
+  assert.equal(dig.board_get('label').alpha, 0);
+  assert.equal(runtime.dig_spots.length, 2, 'hiding markers does not discard the scan');
+  runtime.bug_markers_enabled = true;
+  refresh();
+  assert.equal(bug.enabled, true);
+  assert.equal(dig.enabled, false);
+  runtime.dig_spot_markers_enabled = true;
+  refresh();
+  assert.equal(dig.enabled, true);
   runtime.all_bug_markers_enabled = false;
   refresh();
   assert.equal(bug.board_get('label').text, 'Luna Moth x1');
@@ -4831,7 +5253,7 @@ test('tooltip bounds keep a store tooltip inside the screen without erasing its 
 });
 
 function divingNoticeHarness() {
-  const runtime = { notifications_enabled: true };
+  const runtime = { ...configurationDefaults, notifications_enabled: true, diving_spot_alerts_enabled: true };
   const state = { key: 'day:area:visit', traveling: false, cutscene: false, paused: false,
     ready: true, menuAvailable: true, accept: true };
   const actors = [];
@@ -4856,9 +5278,10 @@ function divingNoticeHarness() {
     },
   };
   const context = load([
+    ...alertPreferenceFunctions,
     privateName('count_diving_spots'),
     ...['detect_diving_spots', 'diving_notice_think', 'reset_local_sightings',
-      'reset_save', 'toggle_notifications'].map(publicName),
+      'reset_save', 'toggle_notifications', 'toggle_configuration'].map(publicName),
   ], {
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_local_visit_key: () => state.key,
@@ -4927,7 +5350,7 @@ test('diving alerts defer through menus and cutscenes and recount only remaining
 
 test('diving alerts honor F10 and do not replay an old visit when enabled', () => {
   const h = divingNoticeHarness();
-  h.runtime.notifications_enabled = false;
+  h.runtime.diving_spot_alerts_enabled = false;
   h.spot();
   h.advance();
   assert.equal(h.notices.length, 0);
@@ -4946,6 +5369,26 @@ test('diving alerts honor F10 and do not replay an old visit when enabled', () =
   pending.context.MistriaCompanion_toggle_notifications();
   pending.advance(30);
   assert.equal(pending.notices.length, 0, 'toggling off cancels a deferred count permanently for the visit');
+});
+
+test('dive-spot switch works independently and disabled visible notices cannot reappear when re-enabled', () => {
+  const h = divingNoticeHarness();
+  h.runtime.notifications_enabled = false;
+  h.spot();
+  h.advance();
+  assert.equal(h.notices.length, 1, 'diving alerts do not depend on the legacy summary or other categories');
+  const toast = h.toasts[0];
+  const popup = configurationPopupStub();
+  h.context.MistriaCompanion_toggle_configuration(popup, 'diving_spot_alerts_enabled');
+  assert.equal(toast.alpha, 0);
+  h.context.MistriaCompanion_toggle_configuration(popup, 'diving_spot_alerts_enabled');
+  toast.alpha = 1;
+  h.advance(30);
+  assert.equal(toast.alpha, 0, 'native animation cannot revive a cancelled visible notice');
+  assert.equal(h.notices.length, 1);
+  h.state.key = 'another visit';
+  h.advance();
+  assert.equal(h.notices.length, 2);
 });
 
 test('diving notices do not flash during departure and equal counts in new areas still display', () => {
@@ -4997,7 +5440,9 @@ test('diving alerts skip empty areas and retry uninitialized spot or menu data e
 
 function digNoticeHarness() {
   const runtime = {
+    ...configurationDefaults,
     dig_spot_visit_key: '', dig_spot_delay: 0, dig_spots: [], notifications_enabled: true,
+    dig_spot_alerts_enabled: true,
   };
   const state = { visit: 'day:area:floor:visit', toastMenuAvailable: true, duplicate: false };
   const messages = [];
@@ -5019,10 +5464,12 @@ function digNoticeHarness() {
   };
   const context = load([
     'menu', 'scan_dig_spots', 'dig_spot_active', 'dig_notice_blocked',
-  ].map(privateName).concat([
-    'detect_dig_spots', 'show_dig_spot_notice', 'dig_notice_think', 'reset_save',
+  ].map(privateName).concat(alertPreferenceFunctions, [
+    'detect_dig_spots', 'show_dig_spot_notice', 'dig_notice_think', 'reset_save', 'toggle_configuration',
   ].map(publicName)), {
     __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_save_preferences: () => true,
+    mmapi_log_warn: (...args) => warnings.push(args),
     __MistriaCompanion_dig_spot_visit_key: () => state.visit,
     __MistriaCompanion_dig_spot_location_name: () => assert.fail('dig notices must not request a location or floor label'),
     MIST: { running: false },
@@ -5083,19 +5530,40 @@ test('dig scans and map data continue during cutscenes, but notices wait for a c
 
 test('muted automatic alerts still scan dig spots for map markers without queuing a notice', () => {
   const h = digNoticeHarness();
-  h.runtime.notifications_enabled = false;
+  h.runtime.dig_spot_alerts_enabled = false;
   h.scan();
   assert.equal(h.runtime.dig_spots.length, 2);
   assert.equal(h.runtime.dig_spot_notice, undefined);
   h.wait(30);
   assert.equal(h.messages.length, 0);
-  h.runtime.notifications_enabled = true;
+  h.runtime.dig_spot_alerts_enabled = true;
   h.wait(30);
   assert.equal(h.messages.length, 0, 'do not replay a past visit merely because alerts were enabled');
   h.state.visit = 'next visit';
   h.scan();
   h.wait(13);
   assert.equal(h.messages.length, 1);
+});
+
+test('dig-spot switch works independently and disabling a visible notice cannot revive it later', () => {
+  const h = digNoticeHarness();
+  h.runtime.notifications_enabled = false;
+  h.runtime.dig_spot_markers_enabled = false;
+  h.scan();
+  h.wait(13);
+  assert.equal(h.messages.length, 1, 'dig alerts do not depend on any map setting or the legacy summary');
+  const toast = h.toasts[0];
+  const popup = configurationPopupStub();
+  h.context.MistriaCompanion_toggle_configuration(popup, 'dig_spot_alerts_enabled');
+  assert.equal(toast.alpha, 0);
+  h.context.MistriaCompanion_toggle_configuration(popup, 'dig_spot_alerts_enabled');
+  toast.alpha = 1;
+  toast.think();
+  assert.equal(toast.alpha, 0);
+  h.detect();
+  h.wait(30);
+  assert.equal(h.messages.length, 1, 'enabling mid-visit never replays the entry count');
+  assert.equal(h.runtime.dig_spots.length, 2);
 });
 
 test('a cutscene beginning during the dig-notice delay restarts the clear interval', () => {
@@ -5160,11 +5628,11 @@ test('deferred dig notices count only remaining active sites and omit an empty a
 test('disabling dig notices or resetting the save cancels a pending notice without losing marker scans', () => {
   const h = digNoticeHarness();
   h.scan();
-  h.runtime.notifications_enabled = false;
+  h.runtime.dig_spot_alerts_enabled = false;
   h.show();
   assert.equal(h.runtime.dig_spot_notice, undefined);
   assert.equal(h.runtime.dig_spots.length, 2);
-  h.runtime.notifications_enabled = true;
+  h.runtime.dig_spot_alerts_enabled = true;
   h.wait(30);
   assert.equal(h.messages.length, 0);
   h.state.visit = 'new visit';
