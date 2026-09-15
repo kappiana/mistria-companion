@@ -23,6 +23,8 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Opens a farm-status menu with crop and empty-soil totals for the farm and greenhouse.
 - Pauses natural clock progression without pausing gameplay or overriding the game's own clock stops.
 - Adds a Configuration button above the mod's active keybindings on the right side of the Settings landing page.
+- Autosaves to a separate reusable crash-recovery slot every five minutes of active play, with a configurable interval and On/Off switch.
+- Saves to that same companion slot on demand with F11, even when timed autosave is off.
 
 The mod uses the live item, recipe, NPC, fish, bug, calendar, and map data shipped with the installed game. It does not bundle game or wiki assets.
 
@@ -69,6 +71,7 @@ launch, or when upgrading without a saved preference:
 | Bug, dig-spot, and Mist Spot map markers (independent switches) | **On** | **Configuration** |
 | Ordinary bugs on the map, alongside very rare bugs | **On** | **F9** |
 | Compact `F7 Wiki` hints | **On** | **F8** |
+| Timed autosave | **On, every 5 active-play minutes** | **Configuration** |
 
 **Configuration switches and your F8, F9, and F10 choices are saved immediately and restored next time you
 play.** A saved choice takes priority over the defaults, including when you load
@@ -94,6 +97,7 @@ They appear afterward only if you are still in the same area or mine-floor visit
 | **F8** | Show or hide the compact `F7 Wiki` hints. |
 | **F9** | Show or hide ordinary bug map markers. |
 | **F10** | Turn automatic spawn, dig-spot, and diving-spot alerts on or off. |
+| **F11** | Save to the reusable companion slot, even with timed autosave off. |
 
 Paste copied wiki links into a browser with `Ctrl+V`.
 
@@ -108,6 +112,16 @@ keybindings opens a menu with these **On/Off** switches:
 - Show dig spot alerts.
 - Show dig spots on the map.
 - Show legendary fish alerts.
+- Autosave.
+
+When **Autosave** is on, an inline **Save every X minutes** slider appears below
+it, ranging from **1 to 30 real-world active-play minutes** (default **5**).
+Drag its handle or click the track; with keyboard/controller navigation, select
+the handle and press left/right to change by one minute. Dragging previews the
+value and saves it on release; track clicks and directional changes save
+immediately. No text-entry dialog opens. Turning autosave off hides the slider
+without forgetting your chosen interval. Older saved intervals above 30 minutes
+are reduced to 30 with a warning in the mod log.
 
 Each switch works independently and applies immediately. Changes save automatically;
 if saving fails, the menu explicitly says the changes apply only to this session.
@@ -126,6 +140,64 @@ not just the defaults. That list remains read-only. Selecting Gameplay,
 Graphics, Audio, Accessibility, Controls, or Exit replaces it with the game's
 normal options. Long binding lists scroll with the mouse wheel or the controller's
 right stick while on the Settings landing page.
+
+### Crash-recovery autosave
+
+Timed autosave is enabled by default and first saves after five minutes of
+active gameplay. It measures real time, not the in-game clock; the companion's
+clock pause does not stop it. Time spent in menus, dialogue, cutscenes, loading,
+transitions, or an unfocused game window does not count. If the interval expires
+during an action, saving waits for one second of normal or mounted gameplay.
+Long stalls and computer-sleep gaps are not counted as active play.
+
+Each character has one reusable companion save,
+`game-<character ID>-2147483648.sav`, in the game's normal saves folder.
+It uses the game's native save format and disk-writing safeguards. It does not
+replace the sleep autosave or existing journal saves and does not create an
+ever-growing list of saves. The native **Load Game** screen displays it with a
+manual-save icon because it occupies a separate slot.
+
+After a crash, choose **Continue**: the game loads the newest save, including
+the companion save if it is the latest. Alternatively, select it by its date
+and time in **Load Game**. If you made a newer journal save or slept afterward,
+Continue correctly loads that newer save instead.
+
+Normal areas preserve your saved location, including dynamic interiors.
+The game's save format does not restore an active mine floor. Autosaving in
+the mines or another nonpersistent area keeps your saved progress but records
+home as the reload location, without moving you during play. The notification
+explicitly says when reloading will return you home.
+
+An **Autosaved** notice appears only after the mod reads back and validates
+the new save's core records and timestamp. The game's checksum/tamper warning
+is logged, not treated as a failed write, matching the native loader; missing
+or unreadable records still fail verification. A failed or blocked save produces a warning and retries after
+one more active-play minute. A pre-existing unreadable companion save is
+reported rather than silently overwritten. Keep normal journal saves as well:
+there is no timed backup before the first interval, and pauses or unsafe actions
+can make the latest backup older than five wall-clock minutes.
+
+The On/Off choice and interval persist between sessions. Changing either starts
+a fresh interval; loading a save or returning to the title also resets the timer.
+F10 controls alerts only and never turns autosave on or off.
+
+### Quick save
+
+Press **F11** during gameplay to request a save to the same reusable companion
+slot. It works even when timed autosave is disabled and does not create a new
+journal save each time. A successful quick save starts a fresh autosave interval
+if timed autosave is enabled.
+
+The save waits for one second of normal or mounted gameplay if an action is
+in progress. Close menus and finish dialogue or traveling before requesting it.
+Wait for **Companion saved** before quitting; the initial **Quick save requested**
+notice does not mean the save has finished. Repeated presses while a request is
+pending do not queue additional saves. A failed save reports an error; press the
+key again to retry.
+
+Quick saving uses the same location rules as autosave: in the mines, your progress
+is saved but reloading returns you home. It does not move you out of the mines
+while playing. **Continue** loads this save when it is the newest.
 
 ### Wiki links and Museum items
 
@@ -329,6 +401,8 @@ The file contains these defaults:
   "dig_spot_alerts_enabled": false,
   "dig_spot_markers_enabled": true,
   "legendary_fish_alerts_enabled": false,
+  "autosave_enabled": true,
+  "autosave_interval_minutes": 5,
   "all_bug_markers_enabled": true,
   "wiki_hints_enabled": true,
   "clock": "F5",
@@ -344,7 +418,9 @@ The file contains these defaults:
   "notifications": "F10",
   "notifications_alternate": "",
   "farm_status": "F4",
-  "farm_status_alternate": ""
+  "farm_status_alternate": "",
+  "save": "F11",
+  "save_alternate": ""
 }
 ```
 
@@ -363,6 +439,11 @@ legacy value is no longer a master switch. Existing
 `dig_notifications` and `dig_notifications_alternate` bindings migrate to
 `notifications` and `notifications_alternate`, so remapped F10 controls are
 preserved when upgrading.
+
+The save hotkey uses `save` and `save_alternate`. If you already assigned F11 to
+another companion action, that existing binding keeps priority; assign a different
+save key here and restart the game. The Settings reference displays the registered
+save binding, including an alternate if configured.
 
 ## Spawn information
 
@@ -501,6 +582,23 @@ It does not unlock Mist Sight, create a spot, spend Essence, or change rewards.
 - Mods that replace or add Seed Maker interactions can disable hold-to-repeat; normal single-press controls remain available.
 
 ## Troubleshooting
+
+**Crash after cooking (`no such field "text"`):** Update to v1.0.52 or newer.
+The companion's cooking-description wrapper now binds the game's text setter
+to the description node instead of the companion's state object. This preserves
+the native description and Gifts button when the cooking menu refreshes.
+Close the game, replace the old mod folder, and run MOMI's **Install** again;
+replacing the files alone does not update the installed game.
+
+**Autosave failed:** Check the companion log below and the game's free disk
+space/write permissions. Other mods may veto saving. If the log reports an
+unreadable companion save, close the game and back up that specific file before
+moving it out of the saves folder; the next timed save can then create a fresh
+companion slot. Do not remove your sleep autosave or journal saves.
+
+Earlier v1.0.52 builds incorrectly reported **Autosave checksum validation failed**
+as a fatal save error. Reinstall this updated build to allow the existing companion
+slot to be checked and reused; do not delete it solely for a checksum/tamper warning.
 
 If a toggle says **Preference not saved**, the change applies only to the current
 session. Check the log below and make sure the game can write to its `mod_data`
