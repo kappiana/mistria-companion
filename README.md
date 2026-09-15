@@ -22,7 +22,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Reveals the active daily Mist Spot on its area's map, even before visiting that area.
 - Opens a farm-status menu with crop and empty-soil totals for the farm and greenhouse.
 - Pauses natural clock progression without pausing gameplay or overriding the game's own clock stops.
-- Lists the mod's active keybindings on the otherwise-empty right side of the Settings landing page.
+- Adds a Configuration button above the mod's active keybindings on the right side of the Settings landing page.
 
 The mod uses the live item, recipe, NPC, fish, bug, calendar, and map data shipped with the installed game. It does not bundle game or wiki assets.
 
@@ -65,13 +65,15 @@ launch, or when upgrading without a saved preference:
 
 | Setting | Default | Change it with |
 | --- | --- | --- |
-| Automatic alerts for bugs, legendary fish, dig spots, and diving spots | **Off** | **F10** |
+| Bug, legendary-fish, dig-spot, and dive-spot alerts (independent switches) | **Off** | **Configuration**, or **F10** for all four |
+| Bug, dig-spot, and Mist Spot map markers (independent switches) | **On** | **Configuration** |
 | Ordinary bugs on the map, alongside very rare bugs | **On** | **F9** |
 | Compact `F7 Wiki` hints | **On** | **F8** |
 
-**Your F8, F9, and F10 choices are saved immediately and restored next time you
+**Configuration switches and your F8, F9, and F10 choices are saved immediately and restored next time you
 play.** A saved choice takes priority over the defaults, including when you load
-a different save.
+a different save. Upgrading to v1.0.51 preserves your previous alert choice for
+each alert type and keeps the existing ordinary-bug and wiki-hint preferences.
 
 F10 only controls automatic alerts. It does **not** hide wiki hints, map markers,
 birthdays, or feedback for actions you take, such as copying a wiki link.
@@ -95,10 +97,32 @@ They appear afterward only if you are still in the same area or mine-floor visit
 
 Paste copied wiki links into a browser with `Ctrl+V`.
 
-Open the journal's **Settings** tab to see a **Mistria Companion** keybind reference
-on the right, before selecting a settings category. It shows your registered
-primary and alternate bindings, not just the defaults. The list is read-only:
-you do not need to edit any files to use the default controls. Selecting Gameplay,
+Open the journal's **Settings** tab to see **Mistria Companion** on the right,
+before selecting a settings category. The **Configuration** button above the
+keybindings opens a menu with these **On/Off** switches:
+
+- Show bug alerts.
+- Show bugs on the map (including very rare bugs).
+- Show dive spot alerts.
+- Show mist spots on the map.
+- Show dig spot alerts.
+- Show dig spots on the map.
+- Show legendary fish alerts.
+
+Each switch works independently and applies immediately. Changes save automatically;
+if saving fails, the menu explicitly says the changes apply only to this session.
+Use the mouse, or move right from the settings categories with directional controls
+to select **Configuration**. Inside the menu, move up/down to select a switch and
+confirm to toggle it. Long lists scroll with the mouse wheel or controller's right
+stick, and directional selection scrolls the selected option into view.
+**Close** or the normal menu-back control returns to Settings.
+
+**F10** remains a group shortcut: if any alert type is on, it turns all four off;
+if all are off, it turns all four on. It does not change map switches.
+**F9** still filters ordinary bugs; it does not override **Show bugs on the map**.
+
+The keybind reference shows your registered primary and alternate bindings,
+not just the defaults. That list remains read-only. Selecting Gameplay,
 Graphics, Audio, Accessibility, Controls, or Exit replaces it with the game's
 normal options. Long binding lists scroll with the mouse wheel or the controller's
 right stick while on the Settings landing page.
@@ -281,7 +305,7 @@ change any hotkeys.
 
 ## Remapping keys and advanced settings
 
-**File editing is optional.** Use F8, F9, and F10 in-game to change and save the
+**File editing is optional.** Use **Settings > Configuration**, F8, F9, or F10 to change and save the
 display preferences. Edit this file only if you want different keybindings or
 to change a setting manually.
 
@@ -298,6 +322,13 @@ The file contains these defaults:
   "__config_version": 1,
   "mounted_interactions_enabled": true,
   "notifications_enabled": false,
+  "bug_alerts_enabled": false,
+  "bug_markers_enabled": true,
+  "diving_spot_alerts_enabled": false,
+  "mist_spot_markers_enabled": true,
+  "dig_spot_alerts_enabled": false,
+  "dig_spot_markers_enabled": true,
+  "legendary_fish_alerts_enabled": false,
   "all_bug_markers_enabled": true,
   "wiki_hints_enabled": true,
   "clock": "F5",
@@ -323,8 +354,12 @@ Use an empty string for no alternate. Invalid primary bindings fall back to thei
 defaults; invalid alternates are disabled. Duplicate bindings within the mod are
 ignored after the first registration and logged. The wiki hint uses the registered
 wiki binding. Restart the game after editing. Bindings, the mounted-interaction
-setting, and the three display preferences persist in this file. The F8/F9/F10
-toggles update their preferences without changing your keybindings. Existing
+setting, and all display preferences persist in this file. Configuration and the
+F8/F9/F10 toggles update their preferences without changing your keybindings.
+`notifications_enabled` is retained for compatibility: it supplies the initial
+value for missing alert switches when upgrading, and is saved as whether any
+alert type is on. Once the individual switches exist, edit those instead; this
+legacy value is no longer a master switch. Existing
 `dig_notifications` and `dig_notifications_alternate` bindings migrate to
 `notifications` and `notifications_alternate`, so remapped F10 controls are
 preserved when upgrading.
@@ -334,14 +369,15 @@ preserved when upgrading.
 ### Automatic bug and legendary-fish alerts
 
 Automatic alerts for **all bug species**, legendary fish, dig spots, and diving spots are
-**off by default**. Press **F10** to enable or disable them as a
-group; your choice is remembered next time you play. Enabling alerts affects new
+**off by default**. Use **Configuration** to enable individual alert types, or
+**F10** to enable or disable them as a group; your choices are remembered next time you play. Enabling alerts affects new
 spawns and visits rather than replaying old notices.
 
 With alerts enabled, entering an area or mine floor with bugs shows **one combined
 left-side notification**, using the same layout as F6: each bug
 species' current count as `Name: count`, and any active legendary fish. It includes
-ordinary, rare, and very rare bugs, regardless of your F9 map-marker setting.
+ordinary, rare, and very rare bugs when **Show bug alerts** is on, regardless of
+your map settings. Legendary fish are included only when their alert switch is on.
 Only notices inside the mines have a location heading, including the floor number.
 
 The full summary appears automatically **only once per visit**. Press **F6** to
@@ -365,7 +401,7 @@ Automatic notices wait for menus, cutscenes, and dialogue to finish, but appear
 waiting for the whole notification queue to clear. Deferred reports use fresh
 counts: caught or despawned bugs and fish no longer present are excluded. Empty areas do
 not produce automatic notices. Leaving the
-area or turning F10 off discards pending automatic notices.
+area or disabling an alert type discards its pending automatic notices.
 Sighting notices wait for the actual room transition to finish, so leaving an
 area does not trigger another summary for the area you are departing.
 
@@ -401,6 +437,8 @@ time if you are still in the same visit.
 All active bug species are shown on the map by default, grouped at the nearest
 map hubs rather than exact world positions. Press **F9** to hide ordinary species
 or show them again; this choice persists. Very rare species remain included.
+Turn **Show bugs on the map** off in Configuration to hide all bug markers,
+including very rare species, without changing your F9 filter.
 Each hub has one marker using a bug's full-color item icon; hover it for the
 species and counts. A very rare species supplies the icon when the group contains
 one. Turning automatic alerts off
@@ -409,7 +447,9 @@ does not change bug-map visibility.
 ### Dig spots and cutscenes
 
 Active dig spots are counted once after each location or mine floor finishes
-loading. F10 controls the optional count notification, not scanning or map markers.
+loading. **Show dig spot alerts** controls the optional count notification;
+**Show dig spots on the map** independently controls the markers. F10 changes
+the alert switch along with the other alert types, not scanning or map markers.
 The notification shows only **Dig spots: N**, without a location or floor label.
 On the map, full-color **mistril shovel** markers group nearby dig spots at map
 hubs, keeping the same icon size as before. Hover a
@@ -424,7 +464,7 @@ Scanning and map markers are unaffected.
 
 ### Diving spots
 
-With **F10** alerts enabled, entering an area with diving spots shows one
+With **Show dive spot alerts** enabled, entering an area with diving spots shows one
 sliding **Diving spots: N** notification. It counts the current area's diving
 spots, not dungeon-entry whirlpools, and does not reveal their loot.
 
@@ -444,7 +484,8 @@ Browse the map's area tabs to locate it; you do not need to visit its area first
 The icon marks its nearest map hub, not exact world coordinates. Hover for the
 label **Mist Spot**, without a location name, or press **F7** while hovering to
 copy its wiki link.
-This marker is independent of F9 and F10. It follows the game's active Mist Spot
+**Show mist spots on the map** in Configuration controls this marker independently
+of F9, F10, and dive-spot alerts. It follows the game's active Mist Spot
 state, disappears after the spot is used, and updates when the daily spot changes.
 It does not unlock Mist Sight, create a spot, spend Essence, or change rewards.
 

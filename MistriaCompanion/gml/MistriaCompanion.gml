@@ -15,6 +15,13 @@ function __MistriaCompanion_runtime() {
             wiki_hint_title: "",
             wiki_hints_enabled: true,
             notifications_enabled: false,
+            bug_alerts_enabled: false,
+            legendary_fish_alerts_enabled: false,
+            diving_spot_alerts_enabled: false,
+            dig_spot_alerts_enabled: false,
+            bug_markers_enabled: true,
+            mist_spot_markers_enabled: true,
+            dig_spot_markers_enabled: true,
             museum_label: undefined,
             all_bug_markers_enabled: true,
             legendary_day: "",
@@ -38,6 +45,7 @@ function __MistriaCompanion_runtime() {
             dig_spot_visit_key: "",
             dig_spot_delay: -1,
             dig_spot_notice: undefined,
+            dig_spot_toast: undefined,
             dig_spots: [],
             diving_spot_visit: undefined
         };
@@ -93,6 +101,7 @@ function MistriaCompanion_reset_save(_ctx) {
     _runtime.dig_spot_visit_key = "";
     _runtime.dig_spot_delay = -1;
     _runtime.dig_spot_notice = undefined;
+    _runtime.dig_spot_toast = undefined;
     _runtime.dig_spots = [];
     _runtime.diving_spot_visit = undefined;
     _runtime.map_menu = undefined;
@@ -128,6 +137,13 @@ function __MistriaCompanion_register_hotkeys() {
     var _config = mmapi_config_read_valid("mistria_item_details", 1);
     _runtime.mounted_interactions_enabled = __MistriaCompanion_mounted_setting(_config);
     _runtime.notifications_enabled = __MistriaCompanion_preference(_config, "notifications_enabled", false);
+    var _options = __MistriaCompanion_configuration_options();
+    for (var _index = 0; _index < array_length(_options); _index++) {
+        var _option = _options[_index];
+        _runtime[$ _option.key] = __MistriaCompanion_preference(
+            _config, _option.key, _option.alert ? _runtime.notifications_enabled : true);
+    }
+    _runtime.notifications_enabled = __MistriaCompanion_any_alerts_enabled();
     _runtime.all_bug_markers_enabled = __MistriaCompanion_preference(_config, "all_bug_markers_enabled", true);
     _runtime.wiki_hints_enabled = __MistriaCompanion_preference(_config, "wiki_hints_enabled", true);
     var _actions = __MistriaCompanion_hotkey_actions();
@@ -140,6 +156,10 @@ function __MistriaCompanion_register_hotkeys() {
         all_bug_markers_enabled: _runtime.all_bug_markers_enabled == true,
         wiki_hints_enabled: _runtime.wiki_hints_enabled == true
     };
+    for (var _index = 0; _index < array_length(_options); _index++) {
+        var _key = _options[_index].key;
+        _saved[$ _key] = _runtime[$ _key] == true;
+    }
     for (var _index = 0; _index < array_length(_actions); _index++) {
         var _action = _actions[_index];
         var _row = { title: _action.title, bindings: [] };
@@ -196,6 +216,60 @@ function __MistriaCompanion_preference(_config, _key, _default) {
     return _default ? true : false;
 }
 
+function __MistriaCompanion_configuration_options() {
+    return [
+        { key: "bug_alerts_enabled", title: "Show bug alerts", alert: true },
+        { key: "bug_markers_enabled", title: "Show bugs on the map", alert: false },
+        { key: "diving_spot_alerts_enabled", title: "Show dive spot alerts", alert: true },
+        { key: "mist_spot_markers_enabled", title: "Show mist spots on the map", alert: false },
+        { key: "dig_spot_alerts_enabled", title: "Show dig spot alerts", alert: true },
+        { key: "dig_spot_markers_enabled", title: "Show dig spots on the map", alert: false },
+        { key: "legendary_fish_alerts_enabled", title: "Show legendary fish alerts", alert: true }
+    ];
+}
+
+function __MistriaCompanion_sighting_alerts_enabled() {
+    var _runtime = __MistriaCompanion_runtime();
+    return _runtime.bug_alerts_enabled || _runtime.legendary_fish_alerts_enabled;
+}
+
+function __MistriaCompanion_any_alerts_enabled() {
+    var _runtime = __MistriaCompanion_runtime();
+    return __MistriaCompanion_sighting_alerts_enabled()
+        || _runtime.diving_spot_alerts_enabled || _runtime.dig_spot_alerts_enabled;
+}
+
+function __MistriaCompanion_apply_alert_preferences(_retire_sightings=false) {
+    var _runtime = __MistriaCompanion_runtime();
+    _runtime.notifications_enabled = __MistriaCompanion_any_alerts_enabled();
+    var _local = _runtime.local_sightings;
+    if (_local != undefined) {
+        if (!_runtime.bug_alerts_enabled) _local.pending_bugs = {};
+        if (!_runtime.legendary_fish_alerts_enabled) _local.pending_fish = {};
+        if (!__MistriaCompanion_sighting_alerts_enabled()) _local.entry_pending = false;
+    }
+    // An already-rendered combined notice may contain a newly disabled category.
+    var _replay = _runtime.sightings_replay;
+    if (_retire_sightings && _replay != undefined && _replay.automatic) {
+        __MistriaCompanion_retire_sightings_notice(_replay.toast);
+        _runtime.sightings_replay = undefined;
+    }
+    if (!_runtime.dig_spot_alerts_enabled) {
+        _runtime.dig_spot_notice = undefined;
+        var _toast = _runtime.dig_spot_toast;
+        if (_toast != undefined && !_toast.freed) _toast.set_alpha(0);
+        _runtime.dig_spot_toast = undefined;
+    }
+    if (!_runtime.diving_spot_alerts_enabled) {
+        var _diving = _runtime.diving_spot_visit;
+        if (_diving != undefined) {
+            _diving.pending = false;
+            if (_diving.toast != undefined && !_diving.toast.freed) _diving.toast.set_alpha(0);
+            _diving.toast = undefined;
+        }
+    }
+}
+
 function __MistriaCompanion_save_preferences() {
     var _runtime = __MistriaCompanion_runtime();
     var _config = mmapi_config_read_valid("mistria_item_details", 1);
@@ -203,22 +277,26 @@ function __MistriaCompanion_save_preferences() {
         mmapi_log_warn("mistria_item_details", "Could not read configuration to save display preferences.");
         return false;
     }
-    _config.notifications_enabled = _runtime.notifications_enabled == true;
-    _config.all_bug_markers_enabled = _runtime.all_bug_markers_enabled == true;
-    _config.wiki_hints_enabled = _runtime.wiki_hints_enabled == true;
+    var _keys = ["notifications_enabled", "all_bug_markers_enabled", "wiki_hints_enabled"];
+    var _options = __MistriaCompanion_configuration_options();
+    for (var _index = 0; _index < array_length(_options); _index++) {
+        array_push(_keys, _options[_index].key);
+    }
+    for (var _index = 0; _index < array_length(_keys); _index++) {
+        var _key = _keys[_index];
+        _config[$ _key] = _runtime[$ _key] == true;
+    }
     mmapi_config_write("mistria_item_details", 1, _config);
     // MMAPI logs write failures but does not return a status.
     var _saved = mmapi_config_read_valid("mistria_item_details", 1);
-    if (!is_struct(_saved)
-        || typeof(_saved[$ "notifications_enabled"]) != "bool"
-        || typeof(_saved[$ "all_bug_markers_enabled"]) != "bool"
-        || typeof(_saved[$ "wiki_hints_enabled"]) != "bool"
-        || _saved.notifications_enabled != _runtime.notifications_enabled
-        || _saved.all_bug_markers_enabled != _runtime.all_bug_markers_enabled
-        || _saved.wiki_hints_enabled != _runtime.wiki_hints_enabled)
-    {
-        mmapi_log_warn("mistria_item_details", "Display preferences could not be saved; changes apply only to this session.");
-        return false;
+    for (var _index = 0; _index < array_length(_keys); _index++) {
+        var _key = _keys[_index];
+        if (!is_struct(_saved) || typeof(_saved[$ _key]) != "bool"
+            || _saved[$ _key] != _runtime[$ _key])
+        {
+            mmapi_log_warn("mistria_item_details", "Display preferences could not be saved; changes apply only to this session.");
+            return false;
+        }
     }
     return true;
 }
@@ -656,6 +734,99 @@ function __MistriaCompanion_settings_keybind_row(_scroller, _row) {
     _scroller.add_height_to_element(_element, _height - 24);
 }
 
+function MistriaCompanion_configuration_row_think(_label, _key) {
+    if (!_label.freed) {
+        var _text = __MistriaCompanion_runtime()[$ _key] ? "On" : "Off";
+        if (_label.get_text() != _text) _label.set_text(_text);
+    }
+}
+
+function MistriaCompanion_toggle_configuration(_popup, _key) {
+    if (_popup.close_requested || _popup.free_requested || _popup.hide_requests > 0) return;
+    var _options = __MistriaCompanion_configuration_options();
+    for (var _index = 0; _index < array_length(_options); _index++) {
+        var _option = _options[_index];
+        if (_option.key != _key) continue;
+        var _runtime = __MistriaCompanion_runtime();
+        _runtime[$ _key] = !_runtime[$ _key];
+        if (_option.alert) {
+            __MistriaCompanion_apply_alert_preferences(!_runtime[$ _key]
+                && (_key == "bug_alerts_enabled" || _key == "legendary_fish_alerts_enabled"));
+        } else {
+            _runtime.map_signature = "";
+            _runtime.scan_frame = -12;
+        }
+        var _saved = __MistriaCompanion_save_preferences();
+        _popup.mistria_configuration_status.set_text(
+            _saved ? "Changes saved automatically." : "Not saved. Changes apply only this session.");
+        return;
+    }
+    mmapi_log_warn("mistria_item_details", "Unknown configuration option: " + string(_key));
+}
+
+function MistriaCompanion_show_configuration(_menu) {
+    if (_menu.close_requested || _menu.free_requested || _menu.hide_requests > 0
+        || _menu.active_page != undefined || _menu.option_scroller == undefined
+        || _menu.option_scroller.canvas.freed || !_menu.option_scroller.canvas.is_unlocked()) return;
+    var _existing = __MistriaCompanion_field(_menu, "mistria_configuration_popup");
+    if (_existing != undefined && !_existing.close_requested && !_existing.free_requested) return;
+    var _screen = ANCHOR.get_true_size();
+    var _popup = popup_creator(undefined, undefined);
+    _popup.backplate.set_width(min(300, _screen.x - 20));
+    _popup.add_title(ANCHOR.wrap_for_local("Mistria Companion configuration"));
+    _popup.add_description(ANCHOR.wrap_for_local(""));
+    _popup.create_button("misc_local/close");
+    _popup.body_text.disable();
+    ANCHOR.free_node(_popup.body_text);
+    var _status = ANCHOR.text(_popup.body)
+        .set_xy(7, 0).set_max_width(_popup.body.get_width() - 14)
+        .allow_line_breaks().set_lut(COMMON_LUT, CommonLutIndex.Dark)
+        .set_text("Not saved. Changes apply only this session.");
+    _status.measure();
+    var _status_height = _status.get_height() + 8;
+    _status.set_text("Changes saved automatically.");
+    _popup.mistria_configuration_status = _status;
+    var _height = max(32, _screen.y - 16 - 50 - _popup.header.get_height() - _popup.header.get_y());
+    var _root = ANCHOR.positional(_popup.body)
+        .set_xy(4, 4).set_size(_popup.body.get_width() - 8, _height - _status_height - 8);
+    var _scroller = create_scroller(_root);
+    var _pilot = _popup.new_pilot()
+        .set_neighbor(_popup.pilot, Cardinal.North).set_neighbor(_popup.pilot, Cardinal.South);
+    _popup.pilot.set_neighbor(_pilot, Cardinal.North).set_neighbor(_pilot, Cardinal.South);
+    _scroller.subscribe_to_pilot(_pilot).scroll_with_stick();
+    var _options = __MistriaCompanion_configuration_options();
+    for (var _index = 0; _index < array_length(_options); _index++) {
+        var _option = _options[_index];
+        var _element = _scroller.new_element(28);
+        var _button = ANCHOR.nine_slice(_element)
+            .set_sprites_from_key("spr_ui_button").set_xy(3, 2)
+            .set_size(_element.get_width() - 6, 24)
+            .add_hover_outline().add_to_pilot(_pilot, true)
+            .set_tap_callback(MistriaCompanion_toggle_configuration, [_popup, _option.key]);
+        var _label = ANCHOR.text(_button).set_xy(5, 5)
+            .set_max_width(_button.get_width() - 42).allow_line_breaks()
+            .set_lut(COMMON_LUT, CommonLutIndex.Dark).set_text(_option.title);
+        _label.measure();
+        var _row_height = max(28, _label.get_height() + 14);
+        _scroller.add_height_to_element(_element, _row_height - 28);
+        _button.set_height(_row_height - 4);
+        var _value = ANCHOR.text(_button).set_xy(_button.get_width() - 30, 5)
+            .set_lut(COMMON_LUT, CommonLutIndex.Dark);
+        _value.set_think_callback(MistriaCompanion_configuration_row_think, [_value, _option.key]);
+        MistriaCompanion_configuration_row_think(_value, _option.key);
+    }
+    _status.set_y(_root.get_height() + 8);
+    _popup.body.set_height(_root.get_height() + _status_height + 8);
+    _popup.refresh_backplate_height();
+    _menu.mistria_configuration_popup = _popup;
+    _popup.spawn();
+    ANCHOR.set_active_pilot(_pilot);
+}
+
+function MistriaCompanion_configuration_button_free(_pilot) {
+    _pilot.reset();
+}
+
 function MistriaCompanion_update_settings_keybinds() {
     var _menu = __MistriaCompanion_menu(Menu.Settings);
     if (_menu == undefined || _menu.hide_requests > 0 || _menu.active_page != undefined) return;
@@ -678,11 +849,26 @@ function MistriaCompanion_update_settings_keybinds() {
     _scroller = create_scroller(_parent);
     _scroller.canvas.board_set("mistria_item_details_keybinds", true);
     _menu.option_scroller = _scroller;
+    var _pilot = __MistriaCompanion_field(_menu, "mistria_configuration_pilot");
+    if (_pilot == undefined) {
+        _pilot = _menu.new_pilot().set_neighbor(_menu.category_pilot, Cardinal.West);
+        _menu.mistria_configuration_pilot = _pilot;
+        _menu.category_pilot.set_neighbor(_pilot, Cardinal.East);
+    }
+    _scroller.subscribe_to_pilot(_pilot).scroll_with_stick();
     var _header = _scroller.new_element(24).set_sprites_from_key("spr_ui_generic_box_category");
     ANCHOR.text(_header)
         .set_text("Mistria Companion")
         .set_align(Align.Center, Align.Middle)
         .set_lut(COMMON_LUT, CommonLutIndex.Header);
+
+    var _configuration = _scroller.new_element(28);
+    ANCHOR.nine_slice(_configuration).set_sprites_from_key("spr_ui_button")
+        .set_xy(4, 3).set_size(_configuration.get_width() - 8, 22)
+        .add_text_label(ANCHOR.wrap_for_local("Configuration"), COMMON_LUT, CommonLutIndex.Dark)
+        .add_hover_outline().add_to_pilot(_pilot)
+        .set_free_callback(MistriaCompanion_configuration_button_free, [_pilot])
+        .set_tap_callback(MistriaCompanion_show_configuration, [_menu]);
 
     var _rows = __MistriaCompanion_runtime().keybind_rows;
     for (var _index = 0; _index < array_length(_rows); _index++) {
@@ -906,14 +1092,16 @@ function __MistriaCompanion_dig_notice_blocked() {
 }
 
 function MistriaCompanion_dig_notice_think(_node) {
-    if (!_node.freed && __MistriaCompanion_dig_notice_blocked()) _node.set_alpha(0);
+    var _runtime = __MistriaCompanion_runtime();
+    if (!_node.freed && (!_runtime.dig_spot_alerts_enabled || _runtime.dig_spot_toast != _node
+        || __MistriaCompanion_dig_notice_blocked())) _node.set_alpha(0);
 }
 
 function MistriaCompanion_show_dig_spot_notice() {
     var _runtime = __MistriaCompanion_runtime();
     var _notice = _runtime.dig_spot_notice;
     if (_notice == undefined) return;
-    if (!_runtime.notifications_enabled || GRID == undefined
+    if (!_runtime.dig_spot_alerts_enabled || GRID == undefined
         || GRID != _notice.grid || __MistriaCompanion_dig_spot_visit_key() != _notice.visit_key)
     {
         _runtime.dig_spot_notice = undefined;
@@ -946,6 +1134,7 @@ function MistriaCompanion_show_dig_spot_notice() {
         "Dig spots: " + string(_count)), 60 * 3);
     if (_shown) {
         var _node = _menu.toasts.last();
+        _runtime.dig_spot_toast = _node;
         _node.set_think_callback(MistriaCompanion_dig_notice_think, [_node]);
     }
     _runtime.dig_spot_notice = undefined;
@@ -985,7 +1174,7 @@ function MistriaCompanion_detect_dig_spots() {
     _runtime.dig_spots = _spots;
     _runtime.dig_spot_delay = -1;
     var _count = array_length(_runtime.dig_spots);
-    if (_count == 0 || !_runtime.notifications_enabled) return;
+    if (_count == 0 || !_runtime.dig_spot_alerts_enabled) return;
 
     _runtime.dig_spot_notice = { grid: GRID, visit_key: _visit_key, wait_frames: 12 };
 }
@@ -1010,8 +1199,8 @@ function __MistriaCompanion_count_diving_spots() {
 function MistriaCompanion_diving_notice_think(_node, _visit) {
     if (_node.freed) return;
     var _runtime = __MistriaCompanion_runtime();
-    if (!__MistriaCompanion_ready() || !_runtime.notifications_enabled
-        || _runtime.diving_spot_visit != _visit || GRID != _visit.grid
+    if (!__MistriaCompanion_ready() || !_runtime.diving_spot_alerts_enabled
+        || _runtime.diving_spot_visit != _visit || _visit.toast != _node || GRID != _visit.grid
         || __MistriaCompanion_local_visit_key() != _visit.key
         || __MistriaCompanion_sightings_transition_active() || game_paused()
         || __MistriaCompanion_dig_notice_blocked())
@@ -1032,12 +1221,12 @@ function MistriaCompanion_detect_diving_spots() {
     var _visit = _runtime.diving_spot_visit;
     if (_visit == undefined || _visit.grid != GRID || _visit.key != _key) {
         _visit = {
-            grid: GRID, key: _key, pending: _runtime.notifications_enabled,
+            grid: GRID, key: _key, pending: _runtime.diving_spot_alerts_enabled,
             wait_frames: 12, toast: undefined
         };
         _runtime.diving_spot_visit = _visit;
     }
-    if (!_runtime.notifications_enabled) _visit.pending = false;
+    if (!_runtime.diving_spot_alerts_enabled) _visit.pending = false;
     if (!_visit.pending) return;
     if (game_paused() || __MistriaCompanion_dig_notice_blocked()) {
         _visit.wait_frames = 12;
@@ -1238,7 +1427,7 @@ function MistriaCompanion_track_local_spawns() {
     if (_local == undefined || FISH == undefined) return;
     var _runtime = __MistriaCompanion_runtime();
     var _live = __MistriaCompanion_live_sightings();
-    if (!_runtime.notifications_enabled) _local.entry_pending = false;
+    if (!__MistriaCompanion_sighting_alerts_enabled()) _local.entry_pending = false;
     var _bugs = __MistriaCompanion_local_species_rows(_live.bugs);
     var _fish = __MistriaCompanion_local_species_rows(_live.fish);
     var _pending_bugs = {};
@@ -1247,7 +1436,7 @@ function MistriaCompanion_track_local_spawns() {
         var _key = string(_bugs[_index].item_id);
         var _new = __MistriaCompanion_field(_local.seen_bugs, _key) != true;
         _local.seen_bugs[$ _key] = true;
-        if (_runtime.notifications_enabled
+        if (_runtime.bug_alerts_enabled
             && (_new || __MistriaCompanion_field(_local.pending_bugs, _key) == true))
         {
             _pending_bugs[$ _key] = true;
@@ -1258,7 +1447,7 @@ function MistriaCompanion_track_local_spawns() {
         var _item_id = _fish[_index].item_id;
         var _key = string(_item_id);
         var _new = __MistriaCompanion_track_legendary("Legendary Fish", _item_id);
-        if (_runtime.notifications_enabled
+        if (_runtime.legendary_fish_alerts_enabled
             && (_new || __MistriaCompanion_field(_local.pending_fish, _key) == true))
         {
             _pending_fish[$ _key] = true;
@@ -1269,7 +1458,7 @@ function MistriaCompanion_track_local_spawns() {
     _local.pending_fish = _pending_fish;
 }
 
-function __MistriaCompanion_local_sightings_report(_pending=undefined) {
+function __MistriaCompanion_local_sightings_report(_pending=undefined, _automatic=false) {
     var _local = __MistriaCompanion_update_local_sightings();
     if (_local == undefined || FISH == undefined) return undefined;
     var _report = __MistriaCompanion_live_sightings();
@@ -1282,6 +1471,7 @@ function __MistriaCompanion_local_sightings_report(_pending=undefined) {
     }
     var _included = 0;
     for (var _index = 0; _index < array_length(_bugs); _index++) {
+        if (_automatic && !__MistriaCompanion_runtime().bug_alerts_enabled) break;
         var _entry = _bugs[_index];
         if (_pending != undefined
             && __MistriaCompanion_field(_pending.bugs, string(_entry.item_id)) != true) continue;
@@ -1291,6 +1481,7 @@ function __MistriaCompanion_local_sightings_report(_pending=undefined) {
         _included++;
     }
     for (var _index = 0; _index < array_length(_fish); _index++) {
+        if (_automatic && !__MistriaCompanion_runtime().legendary_fish_alerts_enabled) break;
         var _entry = _fish[_index];
         if (_pending != undefined
             && __MistriaCompanion_field(_pending.fish, string(_entry.item_id)) != true) continue;
@@ -1300,7 +1491,7 @@ function __MistriaCompanion_local_sightings_report(_pending=undefined) {
         _included++;
     }
     if (_included == 0) {
-        if (_pending != undefined) return "";
+        if (_pending != undefined || _automatic) return "";
         if (_text != "") _text += "\n";
         _text += "No bugs here. No legendary fish active here.";
     }
@@ -1392,7 +1583,7 @@ function MistriaCompanion_sightings_notice_think(_node, _local, _automatic) {
         || __MistriaCompanion_local_visit_key() != _local.key
         || _menu != _node.board_get("mistria_sightings_menu")
         || __MistriaCompanion_sightings_transition_active()
-        || (_automatic && !_runtime.notifications_enabled))
+        || (_automatic && !__MistriaCompanion_sighting_alerts_enabled()))
     {
         __MistriaCompanion_retire_sightings_notice(_node);
         return;
@@ -1442,7 +1633,7 @@ function MistriaCompanion_replay_local_sightings() {
     var _replay = _runtime.sightings_replay;
     if (_replay == undefined) {
         var _local = _runtime.local_sightings;
-        if (_local == undefined || !_runtime.notifications_enabled || GRID != _local.grid
+        if (_local == undefined || !__MistriaCompanion_sighting_alerts_enabled() || GRID != _local.grid
             || __MistriaCompanion_local_visit_key() != _local.key
             || (!_local.entry_pending && array_length(struct_get_names(_local.pending_bugs)) == 0
                 && array_length(struct_get_names(_local.pending_fish)) == 0)) return;
@@ -1465,7 +1656,7 @@ function MistriaCompanion_replay_local_sightings() {
             || _menu.canvas.get_alpha() <= 0) return;
         var _pending = undefined;
         if (!_local.entry_pending) _pending = { bugs: _local.pending_bugs, fish: _local.pending_fish };
-        var _text = __MistriaCompanion_local_sightings_report(_pending);
+        var _text = __MistriaCompanion_local_sightings_report(_pending, true);
         if (_text == undefined) {
             mmapi_warn_rate_limited("mistria_item_details:auto_sightings", "mistria_item_details",
                 "Waiting for local sighting data to show the automatic bug and fish notice.");
@@ -1481,7 +1672,8 @@ function MistriaCompanion_replay_local_sightings() {
         _runtime.sightings_replay = _replay;
     }
     if (GRID != _replay.grid || __MistriaCompanion_local_visit_key() != _replay.visit_key
-        || _runtime.local_sightings != _replay.local || (_replay.automatic && !_runtime.notifications_enabled))
+        || _runtime.local_sightings != _replay.local
+        || (_replay.automatic && !__MistriaCompanion_sighting_alerts_enabled()))
     {
         __MistriaCompanion_retire_sightings_notice(_replay.toast);
         _runtime.sightings_replay = undefined;
@@ -1707,22 +1899,20 @@ function MistriaCompanion_toggle_all_bug_markers() {
     var _saved = __MistriaCompanion_save_preferences();
     __MistriaCompanion_notify(
         (_runtime.all_bug_markers_enabled
-            ? "Ordinary bug map markers enabled."
+            ? (_runtime.bug_markers_enabled ? "Ordinary bug map markers enabled."
+                : "Ordinary bugs enabled; bug map display is off.")
             : "Ordinary bug map markers disabled.")
             + (_saved ? "" : " Preference not saved."), 60 * 2);
 }
 
 function MistriaCompanion_toggle_notifications() {
     var _runtime = __MistriaCompanion_runtime();
-    _runtime.notifications_enabled = !_runtime.notifications_enabled;
-    if (!_runtime.notifications_enabled) {
-        _runtime.dig_spot_notice = undefined;
-        var _diving = _runtime.diving_spot_visit;
-        if (_diving != undefined) {
-            _diving.pending = false;
-            if (_diving.toast != undefined && !_diving.toast.freed) _diving.toast.set_alpha(0);
-        }
+    var _enabled = !__MistriaCompanion_any_alerts_enabled();
+    var _options = __MistriaCompanion_configuration_options();
+    for (var _index = 0; _index < array_length(_options); _index++) {
+        if (_options[_index].alert) _runtime[$ _options[_index].key] = _enabled == true;
     }
+    __MistriaCompanion_apply_alert_preferences(!_enabled);
     var _saved = __MistriaCompanion_save_preferences();
     __MistriaCompanion_notify(
         (_runtime.notifications_enabled ? "Automatic alerts enabled." : "Automatic alerts disabled.")
@@ -2433,14 +2623,16 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
     var _runtime = __MistriaCompanion_runtime();
     var _bugs = [];
     var _spots = [];
-    var _mist = __MistriaCompanion_active_mist_spot();
+    var _mist = _runtime.mist_spot_markers_enabled ? __MistriaCompanion_active_mist_spot() : undefined;
     if (_mist != undefined
         && LOCATIONS[_mist.location_id].map_location != _runtime.map_menu.selected_location_id) _mist = undefined;
-    var _signature = string(_runtime.all_bug_markers_enabled) + ":";
+    var _signature = string(_runtime.all_bug_markers_enabled) + ":"
+        + string(_runtime.bug_markers_enabled) + ":" + string(_runtime.dig_spot_markers_enabled)
+        + ":" + string(_runtime.mist_spot_markers_enabled) + ":";
     var _location_matches = LOCATIONS[CURRENT_LOCATION_ID].map_location
         == _runtime.map_menu.selected_location_id;
     for (var _bug_index = 0; _bug_index < instance_number(obj_bug); _bug_index++) {
-        if (!_location_matches || BUGS == undefined) break;
+        if (!_runtime.bug_markers_enabled || !_location_matches || BUGS == undefined) break;
         var _bug = instance_find(obj_bug, _bug_index);
         if (_bug.item_id == undefined || _bug.item_id < 0
             || _bug.item_id >= array_length(ITEM_PROTOTYPES)) continue;
@@ -2452,7 +2644,8 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
         _signature += string(_bug.id) + ":" + string(_bug.item_id)
             + ":" + string(_bug.x) + ":" + string(_bug.y) + ";";
     }
-    if (_location_matches && _runtime.dig_spot_visit_key == __MistriaCompanion_dig_spot_visit_key()) {
+    if (_runtime.dig_spot_markers_enabled && _location_matches
+        && _runtime.dig_spot_visit_key == __MistriaCompanion_dig_spot_visit_key()) {
         for (var _index = 0; _index < array_length(_runtime.dig_spots); _index++) {
             var _spot = _runtime.dig_spots[_index];
             if (__MistriaCompanion_dig_spot_active(_spot)) {
@@ -3706,5 +3899,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.50");
+mmapi_mod_declare("mistria_item_details", "1.0.51");
 MistriaCompanion_register();
