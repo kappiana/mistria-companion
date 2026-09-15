@@ -18,7 +18,8 @@ function __MistriaCompanion_runtime() {
             legendary_day: "",
             legendary_sightings: [],
             seen_spawns: {},
-            replay_frame: -180,
+            local_sightings: undefined,
+            sightings_replay: undefined,
             birthday_day: "",
             birthday_text: "",
             language: undefined,
@@ -78,7 +79,8 @@ function MistriaCompanion_reset_save(_ctx) {
     _runtime.legendary_day = "";
     _runtime.legendary_sightings = [];
     _runtime.seen_spawns = {};
-    _runtime.replay_frame = -180;
+    _runtime.local_sightings = undefined;
+    _runtime.sightings_replay = undefined;
     _runtime.birthday_day = "";
     _runtime.birthday_text = "";
     _runtime.visit_grid = undefined;
@@ -107,7 +109,7 @@ function MistriaCompanion_clock_advance(_value, _ctx) {
 function __MistriaCompanion_hotkey_actions() {
     return [
         { key: "clock", title: "Pause / release clock", default_key: "F5", callback: MistriaCompanion_toggle_clock },
-        { key: "sightings", title: "Replay rare sightings", default_key: "F6", callback: MistriaCompanion_show_legendary_sightings },
+        { key: "sightings", title: "Bugs and rare fish here", default_key: "F6", callback: MistriaCompanion_show_local_sightings },
         { key: "wiki", title: "Copy current wiki link", default_key: "F7", callback: MistriaCompanion_open_wiki },
         { key: "wiki_hints", title: "Show / hide wiki hints", default_key: "F8", callback: MistriaCompanion_toggle_wiki_hints },
         { key: "bugs", title: "Show / hide ordinary bugs", default_key: "F9", callback: MistriaCompanion_toggle_all_bug_markers },
@@ -965,38 +967,165 @@ function __MistriaCompanion_track_legendary(_kind, _item_id) {
     if (_runtime.notifications_enabled) __MistriaCompanion_notify(_entry, 60 * 4);
 }
 
-function __MistriaCompanion_track_legendary_fish(_fish) {
+function __MistriaCompanion_visit_legendary_fish(_fish, _callback) {
     var _prototype = __MistriaCompanion_field(_fish, "prototype");
     if (_prototype == undefined || _prototype.legendary != true) return;
-    __MistriaCompanion_track_legendary("Legendary Fish", _prototype.item);
+    _callback(_prototype.item);
 }
 
-function MistriaCompanion_track_legendary_spawns() {
-    if (BUGS == undefined || FISH == undefined) return;
-
+function __MistriaCompanion_each_live_bug(_callback) {
     for (var _index = 0; _index < instance_number(obj_bug); _index++) {
         var _bug = instance_find(obj_bug, _index);
-        if (_bug.item_id == undefined) continue;
+        if (_bug == undefined || !instance_exists(_bug) || _bug.item_id == undefined) continue;
         var _bug_data = BUGS.get(_bug.item_id);
-        if (_bug_data != undefined && _bug_data.rarity == "very_rare") {
-            __MistriaCompanion_track_legendary("Very Rare Bug", _bug.item_id);
-        }
+        if (_bug_data != undefined) _callback(_bug.item_id, _bug_data);
     }
+}
 
+function __MistriaCompanion_each_live_legendary_fish(_callback) {
     for (var _index = 0; _index < instance_number(obj_fishy); _index++) {
         var _fish = instance_find(obj_fishy, _index);
+        if (_fish == undefined || !instance_exists(_fish)) continue;
         if (_fish.fish_loot != undefined) {
-            __MistriaCompanion_track_legendary_fish(_fish.fish_loot);
+            __MistriaCompanion_visit_legendary_fish(_fish.fish_loot, _callback);
         }
     }
 
     for (var _index = 0; _index < instance_number(obj_fish_school); _index++) {
         var _school = instance_find(obj_fish_school, _index);
+        if (_school == undefined || !instance_exists(_school)) continue;
         if (_school.fish_in_school == undefined) continue;
         for (var _fish_index = 0; _fish_index < _school.fish_in_school.count(); _fish_index++) {
-            __MistriaCompanion_track_legendary_fish(_school.fish_in_school.get(_fish_index));
+            __MistriaCompanion_visit_legendary_fish(_school.fish_in_school.get(_fish_index), _callback);
         }
     }
+}
+
+function __MistriaCompanion_track_rare_bug(_item_id, _data) {
+    if (_data.rarity == "very_rare") __MistriaCompanion_track_legendary("Very Rare Bug", _item_id);
+}
+
+function __MistriaCompanion_track_rare_fish(_item_id) {
+    __MistriaCompanion_track_legendary("Legendary Fish", _item_id);
+}
+
+function MistriaCompanion_track_legendary_spawns() {
+    if (BUGS == undefined || FISH == undefined) return;
+    __MistriaCompanion_each_live_bug(__MistriaCompanion_track_rare_bug);
+    __MistriaCompanion_each_live_legendary_fish(__MistriaCompanion_track_rare_fish);
+}
+
+function MistriaCompanion_reset_local_sightings(_ctx) {
+    var _runtime = __MistriaCompanion_runtime();
+    _runtime.local_sightings = undefined;
+    _runtime.sightings_replay = undefined;
+}
+
+function __MistriaCompanion_local_visit_key() {
+    var _key = __MistriaCompanion_legendary_day_key() + ":" + string(CURRENT_LOCATION_ID)
+        + ":" + string(CURRENT_DYN_INDEX) + ":" + string(room());
+    if (DUNGEON_RUNNER != undefined) {
+        _key += ":" + string(DUNGEON_RUNNER.current_floor)
+            + ":" + string(__MistriaCompanion_field(DUNGEON_RUNNER.current_level(), "impl"));
+    }
+    return _key;
+}
+
+function __MistriaCompanion_add_local_species(_species, _item_id, _active, _caught) {
+    var _items = global[$ "__item_data"];
+    if (!is_array(_items) || _item_id == undefined || _item_id < 0 || _item_id >= array_length(_items)) {
+        mmapi_warn_rate_limited("mistria_item_details:sighting_item", "mistria_item_details",
+            "An unrecognized sighting item could not be included in the local report.");
+        return;
+    }
+    var _key = string(_item_id);
+    var _entry = __MistriaCompanion_field(_species, _key);
+    if (_entry == undefined) {
+        _entry = { item_id: _item_id, active: 0, caught: 0 };
+        _species[$ _key] = _entry;
+    }
+    _entry.active += _active;
+    _entry.caught += _caught;
+}
+
+function __MistriaCompanion_update_local_sightings() {
+    var _catches = __MistriaCompanion_field(GAME_STATS, "bugs_caught");
+    if (GRID == undefined || __MistriaCompanion_field(GRID, "is_setup") != true
+        || BUGS == undefined || !is_array(_catches) || !is_array(global[$ "__item_data"])) return undefined;
+    var _runtime = __MistriaCompanion_runtime();
+    var _key = __MistriaCompanion_local_visit_key();
+    var _local = _runtime.local_sightings;
+    if (_local == undefined || _local.grid != GRID || _local.key != _key
+        || _local.stats != GAME_STATS || _local.catch_index > array_length(_catches))
+    {
+        _local = { grid: GRID, key: _key, stats: GAME_STATS,
+            catch_index: array_length(_catches), caught: {} };
+        _runtime.local_sightings = _local;
+    }
+    // The native net action appends this log only for catches, not purchases or despawns.
+    for (var _index = _local.catch_index; _index < array_length(_catches); _index++) {
+        var _record = _catches[_index];
+        var _name = __MistriaCompanion_field(_record, "bug");
+        var _item_id = is_string(_name) ? try_string_to_item_id(_name) : undefined;
+        if (_item_id == undefined || BUGS.get(_item_id) == undefined) {
+            mmapi_warn_rate_limited("mistria_item_details:sighting_catch", "mistria_item_details",
+                "An unrecognized bug catch could not be included in the local report.");
+            continue;
+        }
+        __MistriaCompanion_add_local_species(_local.caught, _item_id, 0, 1);
+    }
+    _local.catch_index = array_length(_catches);
+    return _local;
+}
+
+function __MistriaCompanion_collect_local_bug(_item_id, _data) {
+    __MistriaCompanion_add_local_species(self.bugs, _item_id, 1, 0);
+}
+
+function __MistriaCompanion_collect_local_fish(_item_id) {
+    __MistriaCompanion_add_local_species(self.fish, _item_id, 1, 0);
+}
+
+function __MistriaCompanion_local_species_rows(_species) {
+    var _keys = struct_get_names(_species);
+    var _rows = [];
+    for (var _index = 0; _index < array_length(_keys); _index++) {
+        array_push(_rows, _species[$ _keys[_index]]);
+    }
+    array_sort(_rows, function(_left, _right) { return _left.item_id - _right.item_id; });
+    return _rows;
+}
+
+function __MistriaCompanion_local_sightings_report() {
+    var _local = __MistriaCompanion_update_local_sightings();
+    if (_local == undefined || FISH == undefined) return undefined;
+    var _report = { bugs: {}, fish: {} };
+    __MistriaCompanion_each_live_bug(method(_report, __MistriaCompanion_collect_local_bug));
+    __MistriaCompanion_each_live_legendary_fish(method(_report, __MistriaCompanion_collect_local_fish));
+    var _caught = __MistriaCompanion_local_species_rows(_local.caught);
+    for (var _index = 0; _index < array_length(_caught); _index++) {
+        var _entry = _caught[_index];
+        __MistriaCompanion_add_local_species(_report.bugs, _entry.item_id, 0, _entry.caught);
+    }
+    var _bugs = __MistriaCompanion_local_species_rows(_report.bugs);
+    var _fish = __MistriaCompanion_local_species_rows(_report.fish);
+    var _items = global[$ "__item_data"];
+    var _notices = [];
+    var _location = __MistriaCompanion_dig_spot_location_name();
+    for (var _index = 0; _index < array_length(_bugs); _index++) {
+        var _entry = _bugs[_index];
+        array_push(_notices, _location + "\n" + __MistriaCompanion_name(_items[_entry.item_id]) + ": "
+            + string(_entry.active) + " active, " + string(_entry.caught) + " caught");
+    }
+    for (var _index = 0; _index < array_length(_fish); _index++) {
+        var _entry = _fish[_index];
+        array_push(_notices, _location + "\nLegendary fish - " + __MistriaCompanion_name(_items[_entry.item_id])
+            + ": " + string(_entry.active) + " active");
+    }
+    if (array_length(_notices) == 0) {
+        array_push(_notices, _location + "\nNo active or caught bugs this visit. No legendary fish active here.");
+    }
+    return _notices;
 }
 
 function MistriaCompanion_show_mine_bug_spawns() {
@@ -1059,24 +1188,57 @@ function MistriaCompanion_show_mine_bug_spawns() {
     );
 }
 
-function MistriaCompanion_show_legendary_sightings() {
+function MistriaCompanion_show_local_sightings() {
     if (!__MistriaCompanion_ready()) {
         __MistriaCompanion_notify("Sightings are available during gameplay.", 60);
         return;
     }
     var _runtime = __MistriaCompanion_runtime();
-    if (_runtime.frame - _runtime.replay_frame < 180) return;
-    _runtime.replay_frame = _runtime.frame;
-    if (_runtime.legendary_day != __MistriaCompanion_legendary_day_key()
-        || array_length(_runtime.legendary_sightings) == 0)
-    {
-        __MistriaCompanion_notify("No legendary fish or very rare bugs seen today.", 60 * 3);
+    if (_runtime.sightings_replay != undefined) return;
+    var _notices = __MistriaCompanion_local_sightings_report();
+    if (_notices == undefined) {
+        __MistriaCompanion_notify("Sightings are not ready yet. Try again after the area loads.", 60 * 3);
         return;
     }
+    _runtime.sightings_replay = {
+        grid: GRID, visit_key: __MistriaCompanion_local_visit_key(), notices: _notices, index: 0, toast: undefined
+    };
+    MistriaCompanion_replay_local_sightings();
+}
 
-    for (var _index = 0; _index < array_length(_runtime.legendary_sightings); _index++) {
-        __MistriaCompanion_notify(_runtime.legendary_sightings[_index], 60 * 4);
+function MistriaCompanion_sightings_notice_think(_node, _grid, _visit_key) {
+    if (_node.freed) return;
+    if (!__MistriaCompanion_ready() || GRID != _grid
+        || __MistriaCompanion_local_visit_key() != _visit_key || __MistriaCompanion_dig_notice_blocked())
+    {
+        _node.set_alpha(0);
     }
+}
+
+function MistriaCompanion_replay_local_sightings() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _replay = _runtime.sightings_replay;
+    if (_replay == undefined) return;
+    if (GRID != _replay.grid || __MistriaCompanion_local_visit_key() != _replay.visit_key) {
+        _runtime.sightings_replay = undefined;
+        return;
+    }
+    if (_replay.toast != undefined && !_replay.toast.freed) return;
+    if (_replay.index >= array_length(_replay.notices)) {
+        _runtime.sightings_replay = undefined;
+        return;
+    }
+    if (game_paused() || __MistriaCompanion_dig_notice_blocked()) return;
+    var _menu = __MistriaCompanion_menu(Menu.InfoToasts);
+    if (_menu == undefined || _menu.hide_requests > 0 || !_menu.canvas.get_enabled()) return;
+    // Use the native toast lifecycle, without piling a whole area's species off-screen.
+    if (!_menu.toasts.is_empty()) return;
+    if (_menu.create_notification(ANCHOR.wrap_for_local(_replay.notices[_replay.index]), 60 * 3)) {
+        _replay.toast = _menu.toasts.last();
+        _replay.toast.set_think_callback(MistriaCompanion_sightings_notice_think,
+            [_replay.toast, _replay.grid, _replay.visit_key]);
+    }
+    _replay.index++;
 }
 
 function MistriaCompanion_toggle_clock() {
@@ -1259,20 +1421,88 @@ function MistriaCompanion_capture_npc_context() {
     }
 }
 
+function __MistriaCompanion_hud_bottom(_node, _exclude) {
+    if (_node == undefined || _node == _exclude || _node.freed || _node.marked_for_death
+        || !_node.get_enabled() || _node.get_alpha() <= 0) return 0;
+    var _position = ANCHOR.get_screen_position(_node);
+    var _bottom = _position.y + _node.get_height();
+    for (var _index = 0; _index < array_length(_node.children); _index++) {
+        _bottom = max(_bottom, __MistriaCompanion_hud_bottom(_node.children[_index], _exclude));
+    }
+    return _bottom;
+}
+
+function __MistriaCompanion_hud_overlaps(_node, _x, _y, _width, _height) {
+    if (_node == undefined || _node.freed || _node.marked_for_death
+        || !_node.get_enabled() || _node.get_alpha() <= 0) return false;
+    if (_node.type == NodeId.Sprite || _node.type == NodeId.Text || _node.type == NodeId.Typewriter) {
+        var _position = ANCHOR.get_screen_position(_node);
+        if (_x < _position.x + _node.get_width() && _x + _width > _position.x
+            && _y < _position.y + _node.get_height() && _y + _height > _position.y) return true;
+    }
+    for (var _index = 0; _index < array_length(_node.children); _index++) {
+        if (__MistriaCompanion_hud_overlaps(_node.children[_index], _x, _y, _width, _height)) return true;
+    }
+    return false;
+}
+
+function MistriaCompanion_status_label_think(_label, _vitals) {
+    if (_label.freed || _vitals.root.freed) return;
+    if (game_paused() || __MistriaCompanion_dig_notice_blocked() || _vitals.hide_requests > 0
+        || _vitals.close_requested || _vitals.free_requested || !_vitals.root.get_enabled())
+    {
+        _label.set_alpha(0);
+        return;
+    }
+    var _root_position = ANCHOR.get_screen_position(_vitals.root);
+    var _screen = ANCHOR.get_true_size();
+    var _y = __MistriaCompanion_hud_bottom(_vitals.root, _label) + 4;
+    _label.set_max_width(min(160, max(1, _screen.x - _root_position.x - 4)));
+    _label.set_xy(0, _y - _root_position.y);
+    var _size = _label.measure();
+    var _visible = _y + _size.y <= _screen.y - 4;
+    var _hud_menus = [Menu.InfoHud, Menu.Toolbar, Menu.GlyphGuide];
+    for (var _index = 0; _index < array_length(_hud_menus); _index++) {
+        var _hud = __MistriaCompanion_menu(_hud_menus[_index]);
+        if (_hud != undefined && _hud.hide_requests == 0
+            && __MistriaCompanion_hud_overlaps(_hud.canvas, _root_position.x, _y, _size.x, _size.y)) {
+            _visible = false;
+            break;
+        }
+    }
+    var _toasts = __MistriaCompanion_menu(Menu.InfoToasts);
+    if (_toasts != undefined) {
+        for (var _index = 0; _index < _toasts.toasts.count(); _index++) {
+            var _toast = _toasts.toasts.get(_index);
+            if (_toast.freed || !_toast.get_enabled() || _toast.get_alpha() <= 0) continue;
+            var _position = ANCHOR.get_screen_position(_toast);
+            if (_root_position.x < _position.x + _toast.get_width()
+                && _root_position.x + _size.x > _position.x
+                && _y < _position.y + _toast.get_height() && _y + _size.y > _position.y)
+            {
+                _visible = false;
+                break;
+            }
+        }
+    }
+    _label.set_alpha(_visible ? 1 : 0);
+}
+
 function MistriaCompanion_update_birthday_label() {
     var _vitals = __MistriaCompanion_menu(Menu.Vitals);
-    if (_vitals == undefined || _vitals.mana_icon == undefined) return;
+    if (_vitals == undefined || _vitals.mana_icon == undefined || _vitals.root == undefined) return;
 
     var _label = _vitals.mana_icon.board_get("mistria_item_details_birthday_label");
     if (_label == undefined) {
-        _label = ANCHOR.text(_vitals.mana_icon)
-            .set_align(Align.LeftIn, Align.BottomOut)
-            .set_xy(0, 3)
+        _label = ANCHOR.text(_vitals.root)
+            .set_align(Align.LeftIn, Align.TopIn)
+            .set_xy(0, 0)
             .set_lut(COMMON_LUT)
             .set_text_align(TextAlign.Left)
             .set_max_width(160)
             .allow_line_breaks()
             .disable();
+        _label.set_think_callback(MistriaCompanion_status_label_think, [_label, _vitals]);
         _vitals.mana_icon.board_set("mistria_item_details_birthday_label", _label);
     }
 
@@ -1305,9 +1535,11 @@ function MistriaCompanion_update_birthday_label() {
         if (_text != "") _text += "\n";
         _text += "Clock paused";
     }
-    if (_label.board_get("mistria_item_details_text") == _text) return;
-    _label.board_set("mistria_item_details_text", _text);
-    _label.set_text(_text).set_enabled(_text != "");
+    if (_label.board_get("mistria_item_details_text") != _text) {
+        _label.board_set("mistria_item_details_text", _text);
+        _label.set_text(_text).set_enabled(_text != "");
+    }
+    if (_text != "") MistriaCompanion_status_label_think(_label, _vitals);
 }
 
 function MistriaCompanion_capture_quest_item_context() {
@@ -1876,7 +2108,7 @@ function __MistriaCompanion_gift_desire(_item, _npc_id) {
     return __MistriaCompanion_gift_desire_for_npc(_item, _npcs[_npc_id], _npc_id);
 }
 
-function __MistriaCompanion_gift_desire_for_npc(_item, _npc, _npc_id) {
+function __MistriaCompanion_gift_desire_for_npc(_item, _npc, _npc_id, _include_infusion=true) {
     if (_item == undefined || _npc == undefined) return undefined;
     var _prototype = _item.prototype;
     if (_prototype == undefined || _prototype.giftable != true) return undefined;
@@ -1890,10 +2122,10 @@ function __MistriaCompanion_gift_desire_for_npc(_item, _npc, _npc_id) {
     if (_item.item_id == ItemId.VoidCake) {
         return _npc_id == NpcId.Eiland ? Desire.Loved : Desire.Disliked;
     }
-    if (_item.infusion == Infusion.Loveable || _npc.loved_gifts.contains(_item.item_id)) {
+    if ((_include_infusion && _item.infusion == Infusion.Loveable) || _npc.loved_gifts.contains(_item.item_id)) {
         return Desire.Loved;
     }
-    if (_item.infusion == Infusion.Likeable || _npc.liked_gifts.contains(_item.item_id)) {
+    if ((_include_infusion && _item.infusion == Infusion.Likeable) || _npc.liked_gifts.contains(_item.item_id)) {
         return Desire.Liked;
     }
     return Desire.Neutral;
@@ -2453,8 +2685,9 @@ function __MistriaCompanion_for_item(_item) {
     var _item_data = global[$ "__item_data"];
     if (!is_array(_item_data) || _item_id < 0 || _item_id >= array_length(_item_data)) return undefined;
 
+    var _listed_only = _item.infusion == Infusion.Likeable || _item.infusion == Infusion.Loveable;
     var _universal = __MistriaCompanion_universal_gift_text(_item);
-    if (_universal != "") {
+    if (_universal != "" && (!_listed_only || !__MistriaCompanion_has_listed_gift(_item))) {
         return { recipes: "", liked: "", loved: "", gift_sections: [], universal: _universal };
     }
 
@@ -2487,7 +2720,8 @@ function __MistriaCompanion_for_item(_item) {
         for (var _npc_id = 0; _npc_id < _count; _npc_id++) {
             if (!__MistriaCompanion_npc_is_known(_npc_id)) continue;
             var _npc = _npc_data[_npc_id];
-            var _desire = __MistriaCompanion_gift_desire_for_npc(_item, _npc, _npc_id);
+            // Completion lists reflect the NPC's base preference, not an infusion's universal reaction.
+            var _desire = __MistriaCompanion_gift_desire_for_npc(_item, _npc, _npc_id, !_listed_only);
             if (_desire != Desire.Loved && _desire != Desire.Liked) continue;
             var _name = __MistriaCompanion_npc_name(_npc, "Unknown");
             var _entry = {
@@ -2621,6 +2855,16 @@ function __MistriaCompanion_clear_gift_highlights(_body) {
     _body.board_set("mistria_item_details_gift_highlights", undefined);
 }
 
+function __MistriaCompanion_has_listed_gift(_item) {
+    var _npcs = __MistriaCompanion_as_array(global[$ "__npc_prototypes"]);
+    for (var _index = 0; _index < array_length(_npcs); _index++) {
+        var _npc = _npcs[_index];
+        if (_npc == undefined) continue;
+        if (_npc.loved_gifts.contains(_item.item_id) || _npc.liked_gifts.contains(_item.item_id)) return true;
+    }
+    return false;
+}
+
 function __MistriaCompanion_universal_gift_text(_item) {
     var _npcs = __MistriaCompanion_as_array(global[$ "__npc_prototypes"]);
     var _eligible = 0;
@@ -2653,15 +2897,43 @@ function __MistriaCompanion_cooking_base_text(_text, _details) {
 function __MistriaCompanion_cooking_gift_text(_item, _details) {
     if (_details.universal != "") return _details.universal;
     var _gifts = __MistriaCompanion_details_text({ recipes: "", liked: _details.liked, loved: _details.loved });
-    if (_gifts == "") return "No met villagers like or love this dish.";
+    if (_gifts == "") return "No met villagers have this dish in their liked/loved lists.";
     return "Highlighted names have already received this dish.\n\n" + _gifts;
 }
 
-function MistriaCompanion_cooking_gift_scroll(_popup) {
+function MistriaCompanion_text_popup_scroll(_popup) {
     if (_popup.close_requested || _popup.free_requested || _popup.hide_requests > 0) return;
     if (ANCHOR.get_active_pilot() == _popup.pilot && INPUT.gp_right_stick.y != 0) {
-        _popup.mistria_gift_scroller.scroll_by_amount(INPUT.gp_right_stick.y * 4);
+        _popup.mistria_text_scroller.scroll_by_amount(INPUT.gp_right_stick.y * 4);
     }
+}
+
+function __MistriaCompanion_text_popup(_title, _text) {
+    var _screen = ANCHOR.get_true_size();
+    var _popup = popup_creator(undefined, undefined);
+    _popup.backplate.set_width(min(300, _screen.x - 20));
+    _popup.add_title(ANCHOR.wrap_for_local(_title));
+    _popup.add_description(ANCHOR.wrap_for_local(_text));
+    _popup.create_button("misc_local/close");
+    if (_popup.backplate.get_height() > _screen.y - 16) {
+        var _contents = _popup.body_text.get_text();
+        var _height = max(26, _screen.y - 16 - 50 - _popup.header.get_height() - _popup.header.get_y());
+        _popup.body_text.disable();
+        ANCHOR.free_node(_popup.body_text);
+        _popup.body.set_height(_height);
+        var _root = ANCHOR.positional(_popup.body)
+            .set_xy(4, 4).set_size(_popup.body.get_width() - 8, _height - 8);
+        var _scroller = create_scroller(_root);
+        _popup.mistria_text_scroller = _scroller;
+        var _element = _scroller.new_element(16);
+        _popup.body_text = ANCHOR.text(_element)
+            .set_xy(3, 1).set_max_width(_root.get_width() - 12)
+            .allow_line_breaks().set_lut(COMMON_LUT).set_text(_contents);
+        _scroller.add_height_to_element(_element, max(0, _popup.body_text.measure().y + 2 - 16));
+        _root.set_think_callback(MistriaCompanion_text_popup_scroll, [_popup]);
+        _popup.refresh_backplate_height();
+    }
+    return _popup;
 }
 
 function MistriaCompanion_show_cooking_gifts(_menu) {
@@ -2673,32 +2945,11 @@ function MistriaCompanion_show_cooking_gifts(_menu) {
     var _item = _menu.item;
     var _details = __MistriaCompanion_for_item(_item);
     if (_details == undefined) return;
-    var _screen = ANCHOR.get_true_size();
-    var _popup = popup_creator(undefined, undefined);
-    _popup.backplate.set_width(min(300, _screen.x - 20));
-    _popup.add_title(ANCHOR.wrap_for_local(__MistriaCompanion_name(_item.prototype) + " - Gift details"));
-    _popup.add_description(ANCHOR.wrap_for_local(__MistriaCompanion_cooking_gift_text(_item, _details)));
+    var _popup = __MistriaCompanion_text_popup(
+        __MistriaCompanion_name(_item.prototype) + " - Gift details",
+        __MistriaCompanion_cooking_gift_text(_item, _details));
     _popup.item = _item;
     _popup.mistria_cooking_gift_popup = true;
-    _popup.create_button("misc_local/close");
-    if (_popup.backplate.get_height() > _screen.y - 16) {
-        var _text = _popup.body_text.get_text();
-        var _height = max(26, _screen.y - 16 - 50 - _popup.header.get_height() - _popup.header.get_y());
-        _popup.body_text.disable();
-        ANCHOR.free_node(_popup.body_text);
-        _popup.body.set_height(_height);
-        var _root = ANCHOR.positional(_popup.body)
-            .set_xy(4, 4).set_size(_popup.body.get_width() - 8, _height - 8);
-        var _scroller = create_scroller(_root);
-        _popup.mistria_gift_scroller = _scroller;
-        var _element = _scroller.new_element(16);
-        _popup.body_text = ANCHOR.text(_element)
-            .set_xy(3, 1).set_max_width(_root.get_width() - 12)
-            .allow_line_breaks().set_lut(COMMON_LUT).set_text(_text);
-        _scroller.add_height_to_element(_element, max(0, _popup.body_text.measure().y + 2 - 16));
-        _root.set_think_callback(MistriaCompanion_cooking_gift_scroll, [_popup]);
-        _popup.refresh_backplate_height();
-    }
     _menu.mistria_gift_popup = _popup;
     _popup.spawn();
 }
@@ -2830,6 +3081,7 @@ function MistriaCompanion_update_gift_tooltips() {
 
 function MistriaCompanion_floor_built(_ctx) {
     __MistriaCompanion_runtime().visit_grid = undefined;
+    MistriaCompanion_reset_local_sightings(_ctx);
 }
 
 function MistriaCompanion_tick() {
@@ -2846,6 +3098,8 @@ function MistriaCompanion_tick() {
     }
     MistriaCompanion_update_mounted_interactions();
     MistriaCompanion_update_seed_makers();
+    __MistriaCompanion_update_local_sightings();
+    MistriaCompanion_replay_local_sightings();
     var _language = local_language();
     if (_runtime.language != _language) {
         _runtime.language = _language;
@@ -2907,8 +3161,10 @@ function MistriaCompanion_register() {
     mmapi_on("save.game_loaded", MistriaCompanion_reset_save);
     mmapi_on("game.title_entered", MistriaCompanion_reset_save);
     mmapi_on("dungeon.floor_built", MistriaCompanion_floor_built);
+    mmapi_on("game.room_transition_pre", MistriaCompanion_reset_local_sightings);
+    mmapi_on("game.room_transition_post", MistriaCompanion_reset_local_sightings);
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.46");
+mmapi_mod_declare("mistria_item_details", "1.0.47");
 MistriaCompanion_register();

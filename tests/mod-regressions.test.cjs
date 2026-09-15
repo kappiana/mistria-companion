@@ -710,6 +710,12 @@ test('tooltip and picker gift rules respect infusions, void exceptions, and bann
   assert.equal(desire(item(ItemId.VoidCake), npc, NpcId.Eiland), Desire.Loved);
   assert.equal(desire(item(3, Infusion.Loveable, ['banned']), npc, 0), undefined);
   assert.equal(desire(item(3, 0, [], false), npc, 0), undefined);
+  assert.equal(desire(item(4, Infusion.Loveable), npc, 0, false), Desire.Liked,
+    'completion mode does not promote a native liked item to loved');
+  assert.equal(desire(item(5, Infusion.Likeable), npc, 0, false), Desire.Neutral);
+  assert.equal(desire(item(3, Infusion.Likeable), npc, 0, false), Desire.Loved);
+  assert.equal(desire(item(3, Infusion.Loveable, ['banned']), npc, 0, false), undefined);
+  assert.equal(desire(item(ItemId.VoidNewt, Infusion.Loveable), npc, NpcId.Eiland, false), Desire.Disliked);
 });
 
 function giftTooltipHarness() {
@@ -736,11 +742,11 @@ function giftTooltipHarness() {
   const context = load([
     'npc_is_known', 'npc_needs_gift', 'gift_desire_for_npc', 'join', 'for_item', 'details_text',
     'compact_gift_text', 'gift_highlight_runs', 'clear_gift_highlights', 'update_gift_highlights',
-    'universal_gift_text', 'cooking_base_text', 'cooking_gift_text',
-    'clear_cooking_details', 'update_cooking_details',
+    'has_listed_gift', 'universal_gift_text', 'cooking_base_text', 'cooking_gift_text',
+    'clear_cooking_details', 'update_cooking_details', 'text_popup',
   ].map(privateName).concat([
     publicName('description'), publicName('reset_save'), publicName('update_gift_tooltips'),
-    publicName('show_cooking_gifts'), publicName('cooking_gift_scroll'),
+    publicName('show_cooking_gifts'), publicName('text_popup_scroll'),
   ]), {
     Desire, Infusion, ItemId: { VoidNewt: 100, VoidCake: 101 }, NpcId: { Juniper: 10, Eiland: 11 },
     Menu: { Crafting: 'crafting' }, RecipeContext: { Cooking: 'cooking' },
@@ -807,15 +813,16 @@ test('meeting and gifting update the same item immediately while recipes stay ca
   assert.equal(h.recipeReads(), 2);
 });
 
-test('gift history is per base item while hovered infusions still determine preference lists', () => {
+test('gift history is per base item and Likeable/Loveable display lists retain base preferences', () => {
   const h = giftTooltipHarness();
   h.npcs[0].gifts_given.add(0);
   h.npcs[2].gifts_given.add(99);
   assert.equal(h.details().gift_sections[0].npcs[0].given, true);
   assert.equal(h.details().gift_sections[1].npcs[1].given, false);
   h.item.infusion = h.Infusion.Loveable;
-  assert.equal(h.describe(''), 'Loved by: Everyone');
-  assert.equal(h.details().gift_sections.length, 0, 'universal infusions do not enumerate or highlight NPC names');
+  assert.equal(h.describe(''), 'Liked by: Balor\nLoved by: March, Olric');
+  assert.equal(h.details().gift_sections[0].npcs[0].given, true);
+  assert.equal(h.details().gift_sections[1].npcs[1].given, false);
   h.item.infusion = 0;
   assert.equal(h.details().gift_sections[0].npcs[0].given, true, 'summary formatting never changes gift history');
   h.item.prototype.giftable = false;
@@ -824,6 +831,10 @@ test('gift history is per base item while hovered infusions still determine pref
 
 test('universal item tooltips retain the description and show only the exact Everyone summary', () => {
   const h = giftTooltipHarness();
+  for (const npc of h.context.global.__npc_prototypes) {
+    npc.liked_gifts = list([]);
+    npc.loved_gifts = list([]);
+  }
   h.runtime.recipe_cache['0'] = 'Another recipe';
   h.npcs[0].gifts_given.add(0);
   const description = 'A cream-filled donut shaped like a cow. This treat is loved by everyone.';
@@ -868,6 +879,10 @@ test('universal item summaries need no met NPCs and preserve special-item and ba
   const h = giftTooltipHarness();
   const universal = h.context.__MistriaCompanion_universal_gift_text;
   h.item.infusion = h.Infusion.Loveable;
+  for (const npc of h.context.global.__npc_prototypes) {
+    npc.liked_gifts = list([]);
+    npc.loved_gifts = list([]);
+  }
   for (const npc of h.npcs) { npc.met = false; npc.unlocked = false; }
   h.context.NPCS = undefined;
   assert.equal(h.describe('A special dish.'), 'A special dish.\nLoved by: Everyone');
@@ -879,6 +894,87 @@ test('universal item summaries need no met NPCs and preserve special-item and ba
   }
   h.item.prototype.tags = list(['banned']);
   assert.equal(universal(h.item), '', 'no eligible recipients is not Everyone');
+});
+
+test('Likeable and Loveable dishes list only the NPCs with native preferences and retain their original grouping', () => {
+  const h = giftTooltipHarness();
+  h.npcs[0].gifts_given.add(0);
+  h.npcs[1].prototype.loved_gifts = list([]);
+  h.npcs[1].gifts_given.add(0);
+  const expected = 'Liked by: Balor\nLoved by: Olric';
+  for (const infusion of [0, h.Infusion.Likeable, h.Infusion.Loveable]) {
+    h.item.infusion = infusion;
+    assert.equal(h.describe(''), expected);
+    const details = h.details();
+    assert.equal(details.universal, '');
+    assert.equal(details.gift_sections[0].npcs[0].given, true);
+    assert.equal(details.gift_sections[1].npcs[0].given, false);
+    assert.deepEqual(h.runs(h.describe('')).map(run => run.text), ['Balor']);
+    assert.doesNotMatch(h.describe(''), /March|Seridia|Wheedle|Everyone/,
+      'modifier-only, unmet, and locked recipients are not added to completion lists');
+  }
+});
+
+test('Likeable Apple Pie retains Eiland and Hayden while default-infused unlisted festival treats use Everyone', () => {
+  const h = giftTooltipHarness();
+  const prototypes = h.context.global.__npc_prototypes;
+  for (const prototype of prototypes) {
+    prototype.loved_gifts = list([]);
+    prototype.liked_gifts = list([]);
+  }
+  h.npcs[0].prototype.name = 'Eiland';
+  h.npcs[1].prototype.name = 'Hayden';
+  h.npcs[0].prototype.liked_gifts = list([0]);
+  h.npcs[1].prototype.liked_gifts = list([0]);
+  h.npcs[0].gifts_given.add(0);
+  const description = 'This dish is universally liked when given as a gift.';
+  h.item.infusion = h.Infusion.Likeable;
+  assert.equal(h.describe(description), `${description}\nLiked by: Eiland, Hayden`);
+  assert.deepEqual(h.runs(h.describe(description)).map(run => run.text), ['Eiland']);
+  h.item.infusion = h.Infusion.Loveable;
+  assert.equal(h.describe('Universally loved.'), 'Universally loved.\nLiked by: Eiland, Hayden');
+  h.context.global.__item_data.push({ recipe_key: 'cow_donut' });
+  h.item.item_id = 1;
+  h.item.prototype.default_infusion = h.Infusion.Loveable;
+  assert.equal(h.describe('A cream-filled donut shaped like a cow.'),
+    'A cream-filled donut shaped like a cow.\nLoved by: Everyone');
+  assert.equal(h.details().gift_sections.length, 0);
+});
+
+test('completion lists do not reveal unmet preferences or fall back to a modifier-expanded Everyone roster', () => {
+  const h = giftTooltipHarness();
+  h.item.infusion = h.Infusion.Loveable;
+  for (const npc of h.npcs) { npc.met = false; npc.unlocked = false; }
+  assert.equal(h.details().universal, '', 'existence of native preferences is checked across all NPCs');
+  assert.equal(h.details().liked, '');
+  assert.equal(h.details().loved, '');
+  assert.equal(h.describe(), undefined, 'keep the native description when no known recipients are eligible');
+  assert.equal(h.context.__MistriaCompanion_cooking_gift_text(h.item, h.details()),
+    'No met villagers have this dish in their liked/loved lists.');
+  h.npcs[0].met = true;
+  h.npcs[0].unlocked = true;
+  assert.equal(h.describe(''), 'Liked by: Balor');
+  h.npcs[0].prototype.banned_gift_tags = list(['banned']);
+  h.item.prototype.tags = list(['banned']);
+  assert.equal(h.details().liked, '', 'native banned-gift rules still apply');
+});
+
+test('the chest picker retains actual infusion-aware reactions rather than using completion display lists', () => {
+  const h = giftTooltipHarness();
+  const picker = load(['npc_is_known', 'npc_needs_gift', 'gift_desire_for_npc', 'gift_desire', 'is_loved_gift']
+    .map(privateName), {
+    NPCS: h.npcs, global: h.context.global,
+    npc_is_unlocked: id => h.npcs[id].unlocked,
+    Desire: h.context.Desire, Infusion: h.Infusion, ItemId: h.context.ItemId, NpcId: h.context.NpcId,
+  });
+  h.item.infusion = h.Infusion.Loveable;
+  assert.equal(h.details().liked, 'Balor', 'Balor normally only likes this dish');
+  assert.equal(picker.__MistriaCompanion_is_loved_gift(h.item, 0), true,
+    'a Loveable infusion still makes the actual gift loved by Balor');
+  h.item.infusion = h.Infusion.Likeable;
+  assert.equal(picker.__MistriaCompanion_is_loved_gift(h.item, 0), false);
+  assert.equal(picker.__MistriaCompanion_is_loved_gift(h.item, 1), true,
+    'a normally loved item remains loved with a Likeable infusion');
 });
 
 test('given names get exact highlight runs, not commas, headings, or matching description text', () => {
@@ -944,7 +1040,7 @@ test('clock release preserves the incoming engine/filter result and save reset c
 });
 
 const hotkeyCallbacks = [
-  'toggle_clock', 'show_legendary_sightings', 'open_wiki',
+  'toggle_clock', 'show_local_sightings', 'open_wiki',
   'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications',
 ];
 
@@ -1183,12 +1279,12 @@ test('saving preferences preserves current bindings and mounted configuration an
   assert.equal(preferenceSessionHarness(store).runtime.all_bug_markers_enabled, true);
 });
 
-test('automatic rare alerts stay off while observations and explicitly requested replay keep working', () => {
+test('automatic rare alerts stay off while observations are still recorded', () => {
   const runtime = { notifications_enabled: false, legendary_day: '1', legendary_sightings: [],
-    seen_spawns: {}, frame: 1000, replay_frame: -180 };
+    seen_spawns: {} };
   const messages = [];
   const context = load([
-    privateName('has_name'), privateName('track_legendary'), publicName('show_legendary_sightings'),
+    privateName('has_name'), privateName('track_legendary'),
   ], {
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_legendary_day_key: () => '1',
@@ -1203,14 +1299,312 @@ test('automatic rare alerts stay off while observations and explicitly requested
   context.__MistriaCompanion_track_legendary('Very Rare Bug', 1);
   assert.equal(messages.length, 0);
   assert.equal(runtime.legendary_sightings.length, 2);
-  context.MistriaCompanion_show_legendary_sightings();
-  assert.equal(messages.length, 2, 'F6 is a deliberate request and is not silenced');
   runtime.notifications_enabled = true;
   runtime.seen_spawns = {};
   runtime.legendary_sightings = [];
   context.__MistriaCompanion_track_legendary('Very Rare Bug', 1);
-  assert.equal(messages.length, 3);
+  assert.equal(messages.length, 1);
   assert.match(messages.at(-1), /Very Rare Bug: Rare Bug/);
+});
+
+function localSightingsHarness(priorCatches = []) {
+  const runtime = { notifications_enabled: false, all_bug_markers_enabled: false, legendary_day: '1',
+    legendary_sightings: ['Very Rare Bug: Snowball Beetle - Western Ruins'], seen_spawns: {} };
+  const state = { day: 1, room: 'town', ready: true, paused: false, cutscene: false };
+  const actors = { bug: [], fish: [], school: [] };
+  const notices = [];
+  const toasts = [];
+  const feedback = [];
+  const warnings = [];
+  const keys = ['butterfly', 'snowball_beetle', 'moth', 'legendary_fish', 'common_fish'];
+  const items = ['Butterfly', 'Snowball Beetle', 'Moth', 'Legendary Fish', 'Common Fish'].map(name => ({ name }));
+  const bugData = [{ rarity: 'common' }, { rarity: 'very_rare' }, { rarity: 'rare' }];
+  const toastMenu = {
+    hide_requests: 0, canvas: { get_enabled: () => true },
+    toasts: { is_empty: () => toasts.length === 0, last: () => toasts.at(-1) },
+    create_notification(text, duck) {
+      notices.push({ text, duck });
+      toasts.push({
+        freed: false, alpha: 1,
+        set_alpha(value) { this.alpha = value; return this; },
+        set_think_callback(callback, args) { this.think = () => callback(...args); return this; },
+      });
+      return true;
+    },
+  };
+  const context = load([
+    'has_name', 'track_legendary', 'visit_legendary_fish', 'each_live_bug', 'each_live_legendary_fish',
+    'track_rare_bug', 'track_rare_fish', 'local_visit_key', 'add_local_species', 'update_local_sightings',
+    'collect_local_bug', 'collect_local_fish', 'local_species_rows', 'local_sightings_report',
+    'dig_spot_location_name',
+  ].map(privateName).concat([
+    'show_local_sightings', 'replay_local_sightings', 'sightings_notice_think',
+    'reset_local_sightings', 'floor_built', 'reset_save', 'track_legendary_spawns',
+  ].map(publicName)), {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_legendary_day_key: () => String(state.day),
+    __MistriaCompanion_ready: () => state.ready,
+    __MistriaCompanion_name: item => item.name,
+    __MistriaCompanion_location_name: id => ['Town', 'Western Ruins', 'The Mines'][id],
+    __MistriaCompanion_notify: text => feedback.push(text),
+    __MistriaCompanion_text_popup: () => assert.fail('F6 must never create a modal popup'),
+    popup_creator: () => assert.fail('F6 must never acquire a menu pilot or pause the game'),
+    __MistriaCompanion_dig_notice_blocked: () => state.cutscene,
+    __MistriaCompanion_menu: () => toastMenu,
+    game_paused: () => state.paused,
+    Menu: { InfoToasts: 'toasts' },
+    ANCHOR: { wrap_for_local: value => value },
+    global: { __item_data: items },
+    GAME_STATS: { bugs_caught: structuredClone(priorCatches) },
+    CURRENT_LOCATION_ID: 0, CURRENT_DYN_INDEX: 0,
+    GRID: { is_setup: true, node_counter: 100 },
+    DUNGEON_RUNNER: undefined,
+    BUGS: { get: id => bugData[id] }, FISH: {},
+    obj_bug: 'bug', obj_fishy: 'fish', obj_fish_school: 'school',
+    instance_number: kind => actors[kind].length,
+    instance_find: (kind, index) => actors[kind][index],
+    instance_exists: actor => {
+      assert.notEqual(actor, undefined, 'native instance lookup must not receive undefined');
+      return actor.alive !== false;
+    },
+    room: () => state.room,
+    struct_get_names: value => Object.keys(value),
+    try_string_to_item_id: value => {
+      const id = keys.indexOf(value);
+      return id < 0 ? undefined : id;
+    },
+    mmapi_warn_rate_limited: (...args) => warnings.push(args),
+  });
+  const sync = () => context.__MistriaCompanion_update_local_sightings();
+  const report = () => context.__MistriaCompanion_local_sightings_report()?.join('\n');
+  const show = () => context.MistriaCompanion_show_local_sightings();
+  const replay = () => context.MistriaCompanion_replay_local_sightings();
+  function expire() {
+    for (const toast of toasts) toast.freed = true;
+    toasts.length = 0;
+    replay();
+  }
+  function bug(item_id) {
+    const actor = { item_id, alive: true };
+    actors.bug.push(actor);
+    return actor;
+  }
+  function catchBug(actor) {
+    context.GAME_STATS.bugs_caught.push({ bug: keys[actor.item_id], day: state.day });
+    actor.alive = false;
+  }
+  sync();
+  return { context, runtime, state, actors, notices, toasts, toastMenu, expire, replay,
+    feedback, warnings, keys, items, sync, report, show, bug, catchBug };
+}
+
+test('F6 includes ordinary, rare, and very rare local bugs, even with map markers and alerts off', () => {
+  const h = localSightingsHarness();
+  h.bug(0);
+  h.bug(0);
+  h.bug(1);
+  h.bug(2);
+  h.show();
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].text, 'Town\nButterfly: 2 active, 0 caught');
+  h.show();
+  h.replay();
+  assert.equal(h.notices.length, 1, 'repeated F6 presses do not pile up notices');
+  h.expire();
+  assert.equal(h.notices[1].text, 'Town\nSnowball Beetle: 1 active, 0 caught');
+  h.expire();
+  assert.equal(h.notices[2].text, 'Town\nMoth: 1 active, 0 caught');
+  assert.doesNotMatch(h.notices.map(entry => entry.text).join('\n'), /Western Ruins/);
+  assert.equal(h.runtime.notifications_enabled, false);
+  assert.equal(h.runtime.all_bug_markers_enabled, false);
+  assert.equal(h.feedback.length, 0);
+  assert.equal(h.state.paused, false, 'showing sightings must leave gameplay running');
+  h.expire();
+  assert.equal(h.runtime.sightings_replay, undefined);
+});
+
+test('local report retains actual catches, excludes uncaught despawns, and never accumulates active counts', () => {
+  const h = localSightingsHarness();
+  const first = h.bug(0);
+  const second = h.bug(0);
+  const rare = h.bug(1);
+  assert.match(h.report(), /Butterfly: 2 active, 0 caught/);
+  h.catchBug(first);
+  rare.alive = false;
+  let text = h.report();
+  assert.match(text, /Butterfly: 1 active, 1 caught/);
+  assert.doesNotMatch(text, /Snowball Beetle/);
+  assert.equal(h.report(), text, 'reopening the report does not count a catch twice');
+  h.catchBug(second);
+  text = h.report();
+  assert.match(text, /Butterfly: 0 active, 2 caught/);
+  assert.equal(h.context.GAME_STATS.bugs_caught.length, 2, 'reporting never modifies the game catch log');
+  assert.equal(h.runtime.local_sightings.caught['0'].active, 0);
+  h.context.ARI = { inventory: { purchasedBugCount: 999 } };
+  assert.equal(h.report(), text, 'inventory contents are not treated as catches');
+});
+
+test('F6 uses only active legendary fish, including schools, and omits ordinary or disappeared fish', () => {
+  const h = localSightingsHarness();
+  const legendary = { prototype: { legendary: true, item: 3 } };
+  const normal = { prototype: { legendary: false, item: 4 } };
+  const individual = { alive: true, fish_loot: legendary };
+  const schoolItems = [legendary, normal, undefined];
+  h.actors.fish.push(individual, { alive: true, fish_loot: normal }, undefined, { alive: false });
+  h.actors.school.push({
+    alive: true, fish_in_school: { count: () => schoolItems.length, get: index => schoolItems[index] },
+  });
+  assert.match(h.report(), /Legendary Fish: 2 active/);
+  assert.doesNotMatch(h.report(), /Common Fish/);
+  individual.alive = false;
+  schoolItems.shift();
+  assert.doesNotMatch(h.report(), /Legendary fish -/);
+  assert.doesNotMatch(h.report(), /Legendary Fish:/);
+});
+
+test('current visit catch counts reset on area, floor, day, grid, or dynamic-room changes', () => {
+  for (const change of [
+    h => { h.context.CURRENT_LOCATION_ID = 1; },
+    h => { h.context.CURRENT_DYN_INDEX = 2; },
+    h => { h.state.room = 'another room'; },
+    h => { h.state.day++; },
+    h => { h.context.GRID = { is_setup: true, node_counter: 100 }; },
+    h => { h.context.DUNGEON_RUNNER = { current_floor: 84, current_level: () => ({ impl: 'deep' }) }; },
+  ]) {
+    const h = localSightingsHarness();
+    h.catchBug(h.bug(0));
+    assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+    change(h);
+    assert.doesNotMatch(h.report(), /Butterfly/);
+  }
+  const h = localSightingsHarness();
+  h.context.CURRENT_LOCATION_ID = 2;
+  const runner = { current_floor: 83, current_level: () => ({ impl: 'deep' }) };
+  h.context.DUNGEON_RUNNER = runner;
+  h.sync();
+  h.catchBug(h.bug(1));
+  assert.match(h.report(), /Snowball Beetle: 0 active, 1 caught/);
+  runner.current_floor = 84;
+  h.show();
+  assert.match(h.notices[0].text, /^The Mines Floor 85\n/);
+  assert.doesNotMatch(h.notices[0].text, /Snowball Beetle|Western Ruins/);
+  h.catchBug(h.bug(2));
+  assert.match(h.report(), /Moth: 0 active, 1 caught/);
+});
+
+test('digging or spawning nodes does not reset local catches, but room hooks and save loads do', () => {
+  const h = localSightingsHarness([{ bug: 'snowball_beetle', day: 1 }]);
+  assert.doesNotMatch(h.report(), /Snowball Beetle/, 'do not import old catches with no location information');
+  h.catchBug(h.bug(0));
+  assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+  h.context.GRID.node_counter++;
+  assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+  h.context.MistriaCompanion_reset_local_sightings({});
+  assert.doesNotMatch(h.report(), /Butterfly/, 'pre/post transition hooks also cover a return to an identical area key');
+  h.catchBug(h.bug(0));
+  assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+  h.context.MistriaCompanion_floor_built({});
+  assert.doesNotMatch(h.report(), /Butterfly/);
+  h.catchBug(h.bug(0));
+  h.report();
+  h.show();
+  h.context.MistriaCompanion_reset_save({});
+  assert.equal(h.runtime.sightings_replay, undefined);
+  assert.doesNotMatch(h.report(), /Butterfly/);
+});
+
+test('catch-log replacements and malformed entries cannot invent catches or repeat warnings forever', () => {
+  const h = localSightingsHarness();
+  h.context.GAME_STATS.bugs_caught.push({ bug: 'unknown', day: 1 }, {}, { bug: 'butterfly', day: 1 });
+  assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+  assert.equal(h.warnings.length, 2);
+  h.report();
+  assert.equal(h.warnings.length, 2);
+  h.context.GAME_STATS.bugs_caught.length = 0;
+  assert.doesNotMatch(h.report(), /Butterfly/);
+  h.context.GAME_STATS = { bugs_caught: [{ bug: 'moth', day: 1 }] };
+  assert.doesNotMatch(h.report(), /Moth/);
+});
+
+test('F6 reports loading separately from an empty area and refreshes without opening menus', () => {
+  const h = localSightingsHarness();
+  h.state.ready = false;
+  h.show();
+  assert.equal(h.notices.length, 0);
+  assert.match(h.feedback.at(-1), /during gameplay/);
+  h.state.ready = true;
+  h.context.FISH = undefined;
+  h.show();
+  assert.equal(h.notices.length, 0);
+  assert.match(h.feedback.at(-1), /not ready/);
+  h.context.FISH = {};
+  h.show();
+  assert.match(h.notices[0].text, /No active or caught bugs this visit/);
+  h.expire();
+  h.bug(2);
+  h.show();
+  assert.equal(h.notices.length, 2);
+  assert.match(h.notices[1].text, /Moth: 1 active, 0 caught/);
+});
+
+test('F6 notices yield to existing toasts and never display over menus or cutscenes', () => {
+  const h = localSightingsHarness();
+  h.bug(0);
+  const existing = { freed: false };
+  h.toasts.push(existing);
+  h.show();
+  assert.equal(h.notices.length, 0, 'wait for the existing native notification instead of hiding it');
+  h.state.paused = true;
+  h.expire();
+  assert.equal(h.notices.length, 0);
+  h.state.paused = false;
+  h.state.cutscene = true;
+  h.replay();
+  assert.equal(h.notices.length, 0);
+  h.state.cutscene = false;
+  h.replay();
+  assert.equal(h.notices.length, 1);
+  const toast = h.toasts[0];
+  h.state.cutscene = true;
+  toast.think();
+  assert.equal(toast.alpha, 0);
+  assert.equal(h.state.paused, false, 'the notice callback never pauses the game');
+});
+
+test('leaving an area cancels pending F6 notices and hides a stale visible sighting', () => {
+  const h = localSightingsHarness();
+  h.bug(0);
+  h.bug(1);
+  h.show();
+  const toast = h.toasts[0];
+  h.context.CURRENT_LOCATION_ID = 1;
+  toast.think();
+  assert.equal(toast.alpha, 0);
+  h.replay();
+  assert.equal(h.runtime.sightings_replay, undefined);
+  h.expire();
+  assert.equal(h.notices.length, 1, 'do not continue emitting the old area list');
+  h.show();
+  h.context.MistriaCompanion_reset_local_sightings({});
+  assert.equal(h.runtime.sightings_replay, undefined);
+});
+
+test('shared live scanners preserve automatic alerts for very rare bugs and legendary fish only', () => {
+  const h = localSightingsHarness();
+  h.runtime.notifications_enabled = true;
+  h.runtime.legendary_sightings = [];
+  h.bug(0);
+  h.bug(1);
+  h.bug(1);
+  h.bug(2);
+  h.actors.bug.push(undefined, { alive: false }, { alive: true });
+  h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
+  h.context.MistriaCompanion_track_legendary_spawns();
+  assert.deepEqual(h.feedback, [
+    'Very Rare Bug: Snowball Beetle - Town', 'Legendary Fish: Legendary Fish - Town',
+  ]);
+  h.context.MistriaCompanion_track_legendary_spawns();
+  assert.equal(h.feedback.length, 2);
 });
 
 test('mine-floor summaries respect automatic-alert preference without delaying floor initialization', () => {
@@ -2204,6 +2598,8 @@ test('switching between normal and universal gifts removes obsolete NPC-name hig
   update();
   const old = body.board_get('mistria_item_details_gift_highlights').root;
   assert.equal(old.children.length, 1);
+  h.context.global.__item_data.push({ recipe_key: 'cow_donut' });
+  h.item.item_id = 1;
   h.item.infusion = h.Infusion.Loveable;
   body.text = h.describe();
   body.display_text = body.text;
@@ -2211,6 +2607,7 @@ test('switching between normal and universal gifts removes obsolete NPC-name hig
   assert.equal(old.enabled, false);
   assert.equal(old.freed, true);
   assert.equal(body.board_get('mistria_item_details_gift_highlights').root.children.length, 0);
+  h.item.item_id = 0;
   h.item.infusion = 0;
   body.text = h.describe();
   body.display_text = body.text;
@@ -2453,7 +2850,10 @@ test('cooking gift highlights stay item-specific and refresh after history, infu
   h.description.display_text = 'Localized dish description.\nLoved by: Balor, March, 名\n前';
   h.update();
   h.show();
-  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'Loved by: Everyone');
+  assert.match(h.menu.mistria_gift_popup.body_text.text, /Liked by: Balor\nLoved by: March, 名 前$/);
+  h.update();
+  assert.equal(h.menu.mistria_gift_popup.body_text.board_get('mistria_item_details_gift_highlights').root.children.length,
+    2, 'Likeable/Loveable popup retains per-item completion highlights');
   h.menu.mistria_gift_popup.close();
   assert.doesNotMatch(h.description.text, /Seridia|Wheedle/);
   const gifts = h.npcs.map(npc => Array.from(npc.gifts_given));
@@ -2488,14 +2888,14 @@ test('native cooking gift popup preserves full dish descriptions and all long gi
   h.show();
   const popup = h.menu.mistria_gift_popup;
   assert.ok(popup.body_text.text.includes(longName), 'a long gift name is not ellipsized or discarded');
-  assert.ok(popup.mistria_gift_scroller);
+  assert.ok(popup.mistria_text_scroller);
   assert.ok(popup.backplate.height <= h.screen.y - 16);
   h.context.INPUT.gp_right_stick.y = 0.5;
-  h.context.MistriaCompanion_cooking_gift_scroll(popup);
-  assert.equal(popup.mistria_gift_scroller.scroll, 2);
+  h.context.MistriaCompanion_text_popup_scroll(popup);
+  assert.equal(popup.mistria_text_scroller.scroll, 2);
   popup.close();
-  h.context.MistriaCompanion_cooking_gift_scroll(popup);
-  assert.equal(popup.mistria_gift_scroller.scroll, 2);
+  h.context.MistriaCompanion_text_popup_scroll(popup);
+  assert.equal(popup.mistria_text_scroller.scroll, 2);
 });
 
 test('universal gift suppression checks all eligible NPCs, not only met NPCs, and preserves dish description', () => {
@@ -2566,7 +2966,7 @@ test('cooking popup explains when no met villagers like the selected dish and do
   h.update();
   const before = h.npcs.map(npc => Array.from(npc.gifts_given));
   h.show();
-  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'No met villagers like or love this dish.');
+  assert.equal(h.menu.mistria_gift_popup.body_text.text, 'No met villagers have this dish in their liked/loved lists.');
   assert.deepEqual(h.npcs.map(npc => Array.from(npc.gifts_given)), before);
   assert.equal(h.menu.quantity, 3);
 });
@@ -2900,7 +3300,7 @@ function settingsHarness() {
   let pilot = menu.category_pilot;
   const created = [];
   const callbacks = [
-    'toggle_clock', 'show_legendary_sightings', 'open_wiki',
+    'toggle_clock', 'show_local_sightings', 'open_wiki',
     'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications',
   ];
   const context = load([
@@ -3529,6 +3929,153 @@ test('dig-notice scene checks handle absent MIST and hidden or closing dialogue 
   assert.equal(blocked(), true);
 });
 
+function statusLabelHarness() {
+  const runtime = { clock_paused: true, birthday_day: '1', birthday_text: '' };
+  const state = { paused: false, cutscene: false };
+  const screen = { x: 480, y: 270 };
+  class HudNode extends Node {
+    constructor(parent, x, y, width, height, type = 'sprite') {
+      super();
+      Object.assign(this, { parent, x, y, width, height, type, maxWidth: 160 });
+      if (parent) parent.children.push(this);
+    }
+    get_enabled() { return this.enabled && (!this.parent || this.parent.get_enabled()); }
+    get_alpha() { return this.alpha; }
+    get_width() { return this.width; }
+    get_height() { return this.height; }
+    set_align() { return this; }
+    set_text_align() { return this; }
+    set_max_width(width) { this.maxWidth = width; return this; }
+    allow_line_breaks() { return this; }
+    set_enabled(enabled) { this.enabled = enabled; return this; }
+    set_think_callback(callback, args) { this.think = () => callback(...args); return this; }
+    measure() {
+      const lines = this.text.split('\n');
+      this.width = Math.min(this.maxWidth, Math.max(...lines.map(line => line.length * 6)));
+      this.height = lines.reduce((count, line) => count + Math.max(1, Math.ceil(line.length * 6 / this.maxWidth)), 0) * 13;
+      return { x: this.width, y: this.height };
+    }
+  }
+  const canvas = new HudNode(undefined, 0, 0, 480, 270, 'canvas');
+  const root = new HudNode(canvas, 3, 6, 0, 0, 'positional');
+  const mana = new HudNode(root, 0, 30, 10, 10);
+  const health = new HudNode(root, 0, 0, 70, 12);
+  const stamina = new HudNode(root, 0, 15, 70, 12);
+  const statuses = new HudNode(root, 0, 43, 0, 0, 'positional');
+  const icon = new HudNode(statuses, 0, 0, 18, 18);
+  const timer = new HudNode(icon, 0, 19, 18, 6);
+  const vitals = { root, mana_icon: mana, hide_requests: 0 };
+  const toasts = [];
+  const menus = { vitals, toasts: { toasts: { count: () => toasts.length, get: i => toasts[i] } } };
+  function position(node) {
+    const parent = node.parent ? position(node.parent) : { x: 0, y: 0 };
+    return { x: parent.x + node.x, y: parent.y + node.y };
+  }
+  const context = load([
+    privateName('hud_bottom'), privateName('hud_overlaps'),
+    publicName('status_label_think'), publicName('update_birthday_label'),
+  ], {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_menu: id => menus[id],
+    __MistriaCompanion_legendary_day_key: () => '1',
+    __MistriaCompanion_dig_notice_blocked: () => state.cutscene,
+    game_paused: () => state.paused,
+    Menu: { Vitals: 'vitals', InfoToasts: 'toasts', InfoHud: 'info', Toolbar: 'toolbar', GlyphGuide: 'glyphs' },
+    NodeId: { Sprite: 'sprite', Text: 'text', Typewriter: 'typewriter' },
+    COMMON_LUT: 'lut', TextAlign: { Left: 0 }, Align: { LeftIn: 0, TopIn: 0 },
+    ANCHOR: {
+      text: parent => new HudNode(parent, 0, 0, 0, 0, 'text'),
+      get_screen_position: position,
+      get_true_size: () => screen,
+    },
+  });
+  const update = () => context.MistriaCompanion_update_birthday_label();
+  const label = () => mana.board_get('mistria_item_details_birthday_label');
+  return { runtime, state, screen, root, mana, health, stamina, statuses, icon, timer, vitals, menus,
+    toasts, position, context, HudNode, update, label };
+}
+
+test('clock status sits below all vitals, status-effect icons, and their duration bars', () => {
+  const h = statusLabelHarness();
+  h.update();
+  const label = h.label();
+  assert.equal(label.text, 'Clock paused');
+  assert.equal(label.parent, h.root);
+  assert.equal(h.position(label).y, h.position(h.timer).y + h.timer.height + 4);
+  assert.equal(label.alpha, 1);
+  assert.equal(label.enabled, true);
+  const original = h.position(label).y;
+  h.statuses.y += 10;
+  label.think();
+  assert.equal(h.position(label).y, original + 10, 'respond to native HUD movement even when text is unchanged');
+  h.statuses.disable();
+  h.update();
+  assert.equal(h.position(label).y, h.position(h.mana).y + h.mana.height + 4);
+  h.statuses.enable();
+  h.icon.height = 30;
+  h.timer.y = 31;
+  h.update();
+  assert.equal(h.position(label).y, h.position(h.timer).y + h.timer.height + 4);
+});
+
+test('clock/birthday status does not grow its own offset and clears when neither is needed', () => {
+  const h = statusLabelHarness();
+  h.runtime.birthday_text = 'Birthday: Celine';
+  h.update();
+  const label = h.label();
+  const first = h.position(label);
+  assert.equal(label.text, 'Birthday: Celine\nClock paused');
+  for (let i = 0; i < 30; i++) h.update();
+  assert.deepEqual(h.position(label), first, 'exclude the label itself from HUD bounds');
+  h.runtime.clock_paused = false;
+  h.update();
+  assert.equal(label.text, 'Birthday: Celine');
+  h.runtime.birthday_text = '';
+  h.update();
+  assert.equal(label.enabled, false);
+  h.runtime.clock_paused = true;
+  h.update();
+  assert.equal(label.enabled, true);
+  assert.equal(label.text, 'Clock paused');
+  assert.equal(h.root.children.filter(node => node.type === 'text').length, 1);
+});
+
+test('clock status hides behind menus, cutscenes, and overlapping HUD elements or notifications', () => {
+  const h = statusLabelHarness();
+  h.update();
+  const label = h.label();
+  for (const flag of ['paused', 'cutscene']) {
+    h.state[flag] = true;
+    label.think();
+    assert.equal(label.alpha, 0);
+    h.state[flag] = false;
+    h.update();
+    assert.equal(label.alpha, 1);
+  }
+  const p = h.position(label);
+  const toast = new h.HudNode(undefined, p.x, p.y, 170, 42);
+  h.toasts.push(toast);
+  h.update();
+  assert.equal(label.alpha, 0);
+  toast.x = -toast.width; // Notice slides fully off-screen.
+  h.update();
+  assert.equal(label.alpha, 1);
+  for (const menu of ['info', 'toolbar', 'glyphs']) {
+    const canvas = new h.HudNode(undefined, 0, 0, 480, 270, 'canvas');
+    const blocker = new h.HudNode(canvas, p.x, p.y, 24, 24);
+    h.menus[menu] = { canvas, hide_requests: 0 };
+    h.update();
+    assert.equal(label.alpha, 0, `${menu} icon must not be covered`);
+    blocker.disable();
+    h.update();
+    assert.equal(label.alpha, 1, 'transparent canvas bounds alone must not hide the label');
+    delete h.menus[menu];
+  }
+  h.screen.y = p.y + 5;
+  h.update();
+  assert.equal(label.alpha, 0, 'hide rather than clamp upward onto an icon when there is no room');
+});
+
 test('tick retries initialization, resets visit/day observations, and throttles map work', () => {
   const runtime = {};
   let ready = false;
@@ -3544,6 +4091,8 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     MistriaCompanion_update_settings_keybinds: () => {},
     MistriaCompanion_update_gift_tooltips: () => { assert.equal(ready, true); },
     MistriaCompanion_update_seed_makers: () => { assert.equal(ready, true); },
+    __MistriaCompanion_update_local_sightings: () => { assert.equal(ready, true); },
+    MistriaCompanion_replay_local_sightings: () => { assert.equal(ready, true); },
     MistriaCompanion_update_mounted_interactions: () => {
       assert.equal(ready, true, 'mounted initialization must wait until the world is ready');
       mountedUpdates++;
