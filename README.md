@@ -5,7 +5,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 ## Features
 
 - Shows compact cooking or crafting recipe summaries for a hovered item.
-- Lists met villagers who like or love the actual hovered item, including its infusion and special-item gift rules, and highlights names when you have already given them that item.
+- Lists met villagers' gift preferences and highlights items already given, keeping individual completion lists for Likeable/Loveable dishes and short Everyone summaries for unlisted universal treats.
 - Adds a cooking-station Gifts button with full liked/loved lists and gift-history highlights for the selected dish.
 - Adds a chest button that grabs one loved gift for each met villager who has not received a gift that day, prioritizing birthdays and available backpack space.
 - Repeats Seed Maker conversions while Interact is held, using the selected stack and normal seed yields.
@@ -13,8 +13,9 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Copies relevant Fields of Mistria Wiki links for items, villagers, calendar birthdays, quest objectives, Museum wings, and map markers.
 - Reveals names when hovering darkened collection items in all four Museum wings, with individual item wiki links.
 - Shows villager names when hovering known NPC map markers.
-- Displays today's birthdays below the mana meter.
+- Displays today's birthdays and the companion's clock-pause status below the visible vitals and status-effect icons.
 - Offers optional alerts for legendary fish and very rare bug spawns.
+- Shows local F6 notices for active bugs, bugs caught during the current visit, and currently active legendary fish.
 - Groups active bugs into one marker per map hub, with species and counts on hover and ordinary bugs shown by default.
 - Optionally announces active dig spots when entering a location or mine floor and marks their general areas at the nearest map hubs.
 - Reveals the active daily Mist Spot on its area's map, even before visiting that area.
@@ -73,7 +74,8 @@ a different save.
 
 F10 only controls automatic alerts. It does **not** hide wiki hints, map markers,
 birthdays, or feedback for actions you take, such as copying a wiki link.
-You can still press **F6** to replay recorded rare sightings while alerts are off.
+You can still press **F6** for the current area's bug and legendary-fish notices
+while automatic alerts are off.
 
 When dig alerts are enabled, they wait until cutscenes and NPC dialogue end.
 They appear afterward only if you are still in the same area or mine-floor visit.
@@ -83,7 +85,7 @@ They appear afterward only if you are still in the same area or mine-floor visit
 | Key | Action |
 | --- | --- |
 | **F5** | Pause natural clock progression or release the companion's pause. |
-| **F6** | Replay legendary fish and very rare bug sightings from the current day. |
+| **F6** | Replay current-area bug counts and active legendary fish as left-side notices. |
 | **F7** | Copy the relevant Fields of Mistria Wiki URL while supported content is selected or hovered. |
 | **F8** | Show or hide the compact `F7 Wiki` hints. |
 | **F9** | Show or hide ordinary bug map markers. |
@@ -118,8 +120,13 @@ English wiki URL; the mod does not change your language setting.
 
 ### Pausing the clock
 
-While the companion owns a clock pause, **Clock paused** appears below the mana
-meter. Releasing it does not undo a cutscene or another mod's pause. Sleeping,
+While the companion owns a clock pause, **Clock paused** appears below the visible
+health, stamina, mana, and status-effect icons, alongside any birthday reminder.
+The label moves with that HUD layout and hides while menus, cutscenes, or
+overlapping HUD notices would obscure it. If there is no room, it stays hidden
+rather than covering an icon.
+
+Releasing the pause does not undo a cutscene or another mod's pause. Sleeping,
 crafting, and other scripted time changes are not frozen. Loading a save or
 returning to the title screen clears the pause and recorded sightings. Unlike
 the F8/F9/F10 preferences, the clock pause does not carry over to a new session.
@@ -144,17 +151,23 @@ unlocked. A soft teal highlight behind a name means you have given that villager
 the hovered item at least once in the current save, not just today. Preferences
 learned through Gossip alone do not count as gifts given.
 
-Universally liked or loved items show only their original description and
-**Liked by: Everyone** or **Loved by: Everyone**, without individual names or
-name highlights. An item is labelled loved only if every eligible villager
-loves it; a mixture of liked and loved preferences is labelled liked. This
-checks the full NPC data, not just villagers you have met, and follows the
-actual item's infusion and special gift rules.
+**Likeable/Loveable dishes with individual gift preferences** keep their normal
+NPC lists for completion tracking. For example, Likeable Apple Pie lists only
+met villagers who normally like or love Apple Pie—not every villager who would
+accept the modified dish. Names stay in their original **Liked by** or
+**Loved by** group, with highlights for dishes you have already given.
+
+**Universal treats with no individual gift preferences**, such as Cow-Shaped
+Donut, keep **Liked by: Everyone** or **Loved by: Everyone** instead of a long
+list. This checks the full NPC data, not just villagers you have met. An item
+is labelled loved only if every eligible villager loves it; a mixture of liked
+and loved reactions is labelled liked.
 
 Highlights use the game's existing gift history, so past gifts count immediately.
 That history tracks the base item, not its infusion; different infusions of the
-same item share a highlight, while the liked/loved lists still reflect the hovered
-variant. Meeting a villager or giving a gift is reflected the next time you hover
+same item share a highlight. These completion lists do not change the actual
+gift reaction or the chest gift picker's infusion-aware choices. Meeting a
+villager or giving a gift is reflected the next time you hover
 the item. Highlights follow the tooltip's position and fade, including in shops.
 No extra save data or configuration is needed.
 
@@ -171,11 +184,10 @@ stick instead of losing names.
 The popup describes the selected finished dish, not its ingredients. It does
 not require owning the dish or having enough ingredients, and cooking a dish
 does not count as giving it as a gift. It does not predict random infusions
-that might be applied during cooking. For dishes liked or loved by every
-eligible villager, the popup shows **Liked by: Everyone** or **Loved by: Everyone**
-instead of a redundant list.
-This checks all villagers, not just those you have met. Ordinary item tooltips
-are unchanged.
+that might be applied during cooking. It uses the same completion lists as item
+tooltips: Likeable/Loveable dishes keep their individual preferences when they
+have any, while universal treats with no individual preferences show the short
+**Everyone** summary.
 
 ## Holding Interact at the Seed Maker
 
@@ -282,9 +294,32 @@ bug summaries are **off by default**. Press **F10** to enable or disable them as
 group; your choice is remembered next time you play. Enabling alerts affects new
 spawns and visits rather than replaying old notices.
 
-Legendary fish and very rare bugs are recorded only after they actually spawn in
-a map you visit. Sightings are deduplicated by species and location for the
-current day, even while alerts are off. **F6** replays them on request.
+Automatic legendary-fish and very-rare-bug notices refer only to creatures that
+actually spawn in a map you visit. These alerts are deduplicated by species and
+location for the current day.
+
+### F6: Bugs and legendary fish here
+
+Press **F6** to show normal notifications on the **left side of the screen** for
+your **current area or mine floor**, not the day's history from other locations.
+F6 never opens a menu, pauses gameplay, or takes control away from you.
+
+The notices include every bug species with separate **active** and **caught**
+counts, plus any legendary fish still active there. Ordinary bugs are included
+even if you have hidden them on the map. Longer lists play one notice at a time
+so entries do not pile off-screen. Repeated F6 presses while a list is playing
+do not queue duplicate lists.
+
+Caught counts come from actual net catches during this visit, not items bought,
+picked up, or carried in your inventory. Bugs that disappear without being
+caught are excluded. If none of a species remain active or caught, it is not
+listed. Legendary fish that were caught or despawned are not listed.
+
+Catch counts reset when you leave the area, change mine floors, start a new day,
+or reload a save. The list is a snapshot taken when you press F6; press it again
+after the notices finish to refresh. Leaving the area cancels the remaining
+notices. Notices wait while a menu or cutscene is active; an on-screen sighting
+notice is hidden if a cutscene starts.
 
 ### Bugs on the map
 

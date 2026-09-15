@@ -1,7 +1,7 @@
 {
   "name": "Mistria Companion",
   "author": "kappiana",
-  "version": "1.0.46",
+  "version": "1.0.47",
   "description": "Adds item details, wiki shortcuts, HUD information, spawn alerts, map helpers, clock controls, mounted conversations, gifting, gossip and quest hand-ins, and hold-to-repeat Seed Maker use.",
   "minInstallerVersion": "0.15.5",
   "manifestVersion": 1,
@@ -11,6 +11,8 @@
     "input.take_press",
     "save.game_loaded",
     "game.title_entered",
-    "dungeon.floor_built"
+    "dungeon.floor_built",
+    "game.room_transition_pre",
+    "game.room_transition_post"
   ]
 }
