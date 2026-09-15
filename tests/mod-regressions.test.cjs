@@ -1363,7 +1363,7 @@ test('farm status rejects incomplete grid data rather than inventing all-zero to
   }
 });
 
-test('F4 opens one native farm-status menu with combined and per-area counts, independent of alerts', () => {
+test('F4 opens one native farm-status menu with only per-area counts, independent of alerts', () => {
   const runtime = { notifications_enabled: false };
   const menus = [];
   const notices = [];
@@ -1395,9 +1395,9 @@ test('F4 opens one native farm-status menu with combined and per-area counts, in
   assert.equal(menus.length, 1);
   assert.equal(menus[0].title, 'Farm status');
   assert.equal(menus[0].spawned, true);
-  assert.match(menus[0].text, /^Combined totals\nEmpty tilled spots: 5\nReady to harvest: 4\nPlanted, not ready: 8\nUnwatered crops: 3/);
-  assert.match(menus[0].text, /\n\nFarm\nEmpty tilled spots: 1/);
-  assert.match(menus[0].text, /\n\nGreenhouse\nEmpty tilled spots: 4/);
+  assert.equal(menus[0].text,
+    'Farm\nEmpty tilled spots: 1\nReady to harvest: 2\nPlanted, not ready: 5\nUnwatered crops: 2'
+    + '\n\nGreenhouse\nEmpty tilled spots: 4\nReady to harvest: 2\nPlanted, not ready: 3\nUnwatered crops: 1');
   assert.doesNotMatch(menus[0].text, /Hay|Forage|Machines|Cave/);
   paused = true;
   show();
@@ -1863,7 +1863,8 @@ test('F6 includes ordinary, rare, and very rare local bugs, even with map marker
   h.show();
   assert.equal(h.notices.length, 1);
   assert.equal(h.notices[0].text,
-    'Butterfly: 2 active, 0 caught\nSnowball Beetle: 1 active, 0 caught\nMoth: 1 active, 0 caught');
+    'Butterfly: 2\nSnowball Beetle: 1\nMoth: 1');
+  assert.doesNotMatch(h.notices[0].text, /active|caught/);
   assert.doesNotMatch(h.notices[0].text, /Town|^\n/, 'surface notices have no location heading or blank first line');
   h.show();
   h.replay();
@@ -1879,7 +1880,7 @@ test('F6 includes ordinary, rare, and very rare local bugs, even with map marker
   assert.equal(h.runtime.sightings_replay, undefined);
 });
 
-test('F6 combines active and caught bugs and legendary fish in the same native notification', () => {
+test('F6 combines remaining bugs and legendary fish while omitting caught bugs', () => {
   const h = localSightingsHarness();
   h.context.CURRENT_LOCATION_ID = 2;
   h.context.DUNGEON_RUNNER = { current_floor: 95, current_level: () => ({ impl: 'ruins' }) };
@@ -1891,7 +1892,7 @@ test('F6 combines active and caught bugs and legendary fish in the same native n
   h.show();
   assert.equal(h.notices.length, 1);
   assert.equal(h.notices[0].text,
-    'The Mines Floor 96\nButterfly: 0 active, 1 caught\nSnowball Beetle: 1 active, 0 caught\n'
+    'The Mines Floor 96\nSnowball Beetle: 1\n'
     + 'Legendary fish - Legendary Fish: 1 active');
   assert.equal(h.toasts.length, 1);
   assert.equal(h.state.paused, false);
@@ -1910,10 +1911,10 @@ test('sighting headings appear only in the mines for bug, fish-only, and empty r
         h.context.CURRENT_LOCATION_ID = 1;
       }
       const heading = inMines ? 'The Mines Floor 96\n' : '';
-      let body = 'No active or caught bugs this visit. No legendary fish active here.';
+      let body = 'No bugs here. No legendary fish active here.';
       if (content === 'bugs') {
         h.bug(0);
-        body = 'Butterfly: 1 active, 0 caught';
+        body = 'Butterfly: 1';
       } else if (content === 'fish') {
         h.actors.fish.push({ alive: true, fish_loot: { prototype: { legendary: true, item: 3 } } });
         body = 'Legendary fish - Legendary Fish: 1 active';
@@ -1932,7 +1933,7 @@ test('oversized F6 reports stay in one on-screen toast and automatically cycle a
     const id = h.items.length;
     h.items.push({ name: `Another long named bug species ${i}` });
     h.keys.push(`bug_${i}`);
-    h.context.GAME_STATS.bugs_caught.push({ bug: `bug_${i}` });
+    h.bug(id);
   }
   h.context.BUGS.get = id => ({ rarity: id === 1 ? 'very_rare' : 'common' });
   h.show();
@@ -1991,21 +1992,21 @@ test('sighting pages adapt around other notices without losing lines or consumin
   assert.equal(other.freed, false);
 });
 
-test('local report retains actual catches, excludes uncaught despawns, and never accumulates active counts', () => {
+test('local report excludes catches and despawns and never accumulates active counts', () => {
   const h = localSightingsHarness();
   const first = h.bug(0);
   const second = h.bug(0);
   const rare = h.bug(1);
-  assert.match(h.report(), /Butterfly: 2 active, 0 caught/);
+  assert.match(h.report(), /Butterfly: 2/);
   h.catchBug(first);
   rare.alive = false;
   let text = h.report();
-  assert.match(text, /Butterfly: 1 active, 1 caught/);
+  assert.equal(text, 'Butterfly: 1');
   assert.doesNotMatch(text, /Snowball Beetle/);
   assert.equal(h.report(), text, 'reopening the report does not count a catch twice');
   h.catchBug(second);
   text = h.report();
-  assert.match(text, /Butterfly: 0 active, 2 caught/);
+  assert.equal(text, 'No bugs here. No legendary fish active here.');
   assert.equal(h.context.GAME_STATS.bugs_caught.length, 2, 'reporting never modifies the game catch log');
   assert.equal(h.runtime.local_sightings.caught['0'].active, 0);
   h.context.ARI = { inventory: { purchasedBugCount: 999 } };
@@ -2041,9 +2042,11 @@ test('current visit catch counts reset on area, floor, day, grid, or dynamic-roo
   ]) {
     const h = localSightingsHarness();
     h.catchBug(h.bug(0));
-    assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+    h.sync();
+    assert.equal(h.runtime.local_sightings.caught['0'].caught, 1);
     change(h);
     assert.doesNotMatch(h.report(), /Butterfly/);
+    assert.equal(h.runtime.local_sightings.caught['0'], undefined);
   }
   const h = localSightingsHarness();
   h.context.CURRENT_LOCATION_ID = 2;
@@ -2051,45 +2054,55 @@ test('current visit catch counts reset on area, floor, day, grid, or dynamic-roo
   h.context.DUNGEON_RUNNER = runner;
   h.sync();
   h.catchBug(h.bug(1));
-  assert.match(h.report(), /Snowball Beetle: 0 active, 1 caught/);
+  h.sync();
+  assert.equal(h.runtime.local_sightings.caught['1'].caught, 1);
   runner.current_floor = 84;
   h.show();
   assert.match(h.notices[0].text, /^The Mines Floor 85\n/);
   assert.doesNotMatch(h.notices[0].text, /Snowball Beetle|Western Ruins/);
   h.catchBug(h.bug(2));
-  assert.match(h.report(), /Moth: 0 active, 1 caught/);
+  h.sync();
+  assert.equal(h.runtime.local_sightings.caught['2'].caught, 1);
 });
 
 test('digging or spawning nodes does not reset local catches, but room hooks and save loads do', () => {
   const h = localSightingsHarness([{ bug: 'snowball_beetle', day: 1 }]);
   assert.doesNotMatch(h.report(), /Snowball Beetle/, 'do not import old catches with no location information');
   h.catchBug(h.bug(0));
-  assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+  h.sync();
+  assert.equal(h.runtime.local_sightings.caught['0'].caught, 1);
   h.context.GRID.node_counter++;
-  assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+  h.sync();
+  assert.equal(h.runtime.local_sightings.caught['0'].caught, 1);
   h.context.MistriaCompanion_reset_local_sightings({});
   assert.doesNotMatch(h.report(), /Butterfly/, 'pre/post transition hooks also cover a return to an identical area key');
+  assert.equal(h.runtime.local_sightings.caught['0'], undefined);
   h.catchBug(h.bug(0));
-  assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+  h.sync();
+  assert.equal(h.runtime.local_sightings.caught['0'].caught, 1);
   h.context.MistriaCompanion_floor_built({});
   assert.doesNotMatch(h.report(), /Butterfly/);
+  assert.equal(h.runtime.local_sightings.caught['0'], undefined);
   h.catchBug(h.bug(0));
   h.report();
   h.show();
   h.context.MistriaCompanion_reset_save({});
   assert.equal(h.runtime.sightings_replay, undefined);
   assert.doesNotMatch(h.report(), /Butterfly/);
+  assert.equal(h.runtime.local_sightings.caught['0'], undefined);
 });
 
 test('catch-log replacements and malformed entries cannot invent catches or repeat warnings forever', () => {
   const h = localSightingsHarness();
   h.context.GAME_STATS.bugs_caught.push({ bug: 'unknown', day: 1 }, {}, { bug: 'butterfly', day: 1 });
-  assert.match(h.report(), /Butterfly: 0 active, 1 caught/);
+  assert.doesNotMatch(h.report(), /Butterfly/);
+  assert.equal(h.runtime.local_sightings.caught['0'].caught, 1);
   assert.equal(h.warnings.length, 2);
   h.report();
   assert.equal(h.warnings.length, 2);
   h.context.GAME_STATS.bugs_caught.length = 0;
   assert.doesNotMatch(h.report(), /Butterfly/);
+  assert.equal(h.runtime.local_sightings.caught['0'], undefined);
   h.context.GAME_STATS = { bugs_caught: [{ bug: 'moth', day: 1 }] };
   assert.doesNotMatch(h.report(), /Moth/);
 });
@@ -2107,12 +2120,12 @@ test('F6 reports loading separately from an empty area and refreshes without ope
   assert.match(h.feedback.at(-1), /not ready/);
   h.context.FISH = {};
   h.show();
-  assert.match(h.notices[0].text, /No active or caught bugs this visit/);
+  assert.match(h.notices[0].text, /No bugs here/);
   h.expire();
   h.bug(2);
   h.show();
   assert.equal(h.notices.length, 2);
-  assert.match(h.notices[1].text, /Moth: 1 active, 0 caught/);
+  assert.equal(h.notices[1].text, 'Moth: 1');
 });
 
 test('F6 notices coexist with native toasts and suspend while menus or cutscenes hide them', () => {
@@ -2177,8 +2190,8 @@ test('automatic entry notice combines every bug rarity, counts, and legendary fi
   h.advance(1);
   assert.equal(h.notices.length, 1);
   assert.equal(h.notices[0].text, h.report());
-  assert.equal(h.notices[0].text, 'Butterfly: 1 active, 0 caught\n'
-    + 'Snowball Beetle: 2 active, 0 caught\nMoth: 1 active, 0 caught\n'
+  assert.equal(h.notices[0].text, 'Butterfly: 1\n'
+    + 'Snowball Beetle: 2\nMoth: 1\n'
     + 'Legendary fish - Legendary Fish: 1 active');
   assert.equal(h.runtime.sightings_replay.automatic, true);
   assert.equal(h.state.paused, false);
@@ -2202,7 +2215,7 @@ test('automatic sightings remain quiet by default and enabling alerts does not r
   h.bug(2);
   h.advance();
   assert.equal(h.notices.length, 1);
-  assert.equal(h.notices[0].text, 'Moth: 1 active, 0 caught',
+  assert.equal(h.notices[0].text, 'Moth: 1',
     'enabling alerts mid-visit permits new-species updates, not a replay of the entry list');
 });
 
@@ -2220,10 +2233,10 @@ test('automatic bug summaries repeat for new species, not catches, duplicates, o
   h.bug(2);
   h.advance();
   assert.equal(h.notices.length, 2);
-  assert.equal(h.notices[1].text, 'Moth: 1 active, 0 caught');
+  assert.equal(h.notices[1].text, 'Moth: 1');
   h.expire();
   h.show();
-  assert.equal(h.notices[2].text, 'Butterfly: 1 active, 1 caught\nMoth: 1 active, 0 caught',
+  assert.equal(h.notices[2].text, 'Butterfly: 1\nMoth: 1',
     'only F6 requests the full list again during the visit');
 });
 
@@ -2236,13 +2249,13 @@ test('mine-floor bug notices use the combined renderer and include species revea
   h.bug(0);
   h.bug(0);
   h.advance();
-  assert.equal(h.notices[0].text, 'The Mines Floor 96\nButterfly: 2 active, 0 caught');
+  assert.equal(h.notices[0].text, 'The Mines Floor 96\nButterfly: 2');
   h.expire();
   h.bug(2);
   h.context.GRID.node_counter++;
   h.advance();
   assert.equal(h.notices.length, 2, 'a new species revealed from a rock triggers a small update');
-  assert.equal(h.notices[1].text, 'Moth: 1 active, 0 caught',
+  assert.equal(h.notices[1].text, 'Moth: 1',
     'follow-ups omit the old species and even the mine heading to stay compact');
   h.expire();
   runner.current_floor++;
@@ -2295,7 +2308,7 @@ test('automatic notices wait for menus and cutscenes but not unrelated native no
   h.advance(12);
   assert.equal(h.notices.length, 0);
   h.advance(1);
-  assert.equal(h.notices[0].text, 'Butterfly: 0 active, 1 caught\nMoth: 1 active, 0 caught');
+  assert.equal(h.notices[0].text, 'Moth: 1');
   assert.equal(h.nativeToasts[0], existing);
   assert.ok(h.toasts[0].y >= existing.y + existing.height);
   h.state.cutscene = true;
@@ -2327,7 +2340,7 @@ test('the old area cannot create an entry notice between transition hooks and ac
   assert.equal(h.notices.length, 1);
   h.advance(1);
   assert.equal(h.notices.length, 2);
-  assert.equal(h.notices[1].text, 'Butterfly: 1 active, 0 caught');
+  assert.equal(h.notices[1].text, 'Butterfly: 1');
 });
 
 test('departing retires only the companion notice without changing the native notification queue', () => {
@@ -2364,7 +2377,7 @@ test('automatic notices coalesce discoveries while a notice is visible or pendin
   h.expire();
   h.advance();
   assert.equal(h.notices.length, 2);
-  assert.equal(h.notices[1].text, 'Snowball Beetle: 1 active, 0 caught\nMoth: 1 active, 0 caught');
+  assert.equal(h.notices[1].text, 'Snowball Beetle: 1\nMoth: 1');
   h.expire();
   h.advance(30);
   assert.equal(h.notices.length, 2, 'multiple discoveries create one update, not a queue of snapshots');
@@ -2406,7 +2419,25 @@ test('empty areas and uncaught despawns never create an automatic no-sightings n
   assert.equal(h.notices.length, 0);
 });
 
-test('new-species updates after an empty entry are compact and retain catches while deferred', () => {
+test('catching every pending bug cancels deferred entry and new-species notices', () => {
+  for (const afterEmptyEntry of [false, true]) {
+    const h = localSightingsHarness();
+    h.runtime.notifications_enabled = true;
+    if (afterEmptyEntry) h.advance();
+    h.state.cutscene = true;
+    const bug = h.bug(0);
+    h.advance();
+    h.catchBug(bug);
+    h.advance();
+    assert.equal(Object.keys(h.runtime.local_sightings.pending_bugs).length, 0);
+    h.state.cutscene = false;
+    h.advance(30);
+    assert.equal(h.notices.length, 0);
+    assert.equal(h.report(), 'No bugs here. No legendary fish active here.');
+  }
+});
+
+test('new-species updates after an empty entry are compact and exclude catches while deferred', () => {
   const h = localSightingsHarness();
   h.runtime.notifications_enabled = true;
   h.context.CURRENT_LOCATION_ID = 2;
@@ -2422,7 +2453,7 @@ test('new-species updates after an empty entry are compact and retain catches wh
   h.advance();
   h.state.cutscene = false;
   h.advance();
-  assert.equal(h.notices[0].text, 'Butterfly: 1 active, 1 caught');
+  assert.equal(h.notices[0].text, 'Butterfly: 1');
   h.expire();
   h.bug(0);
   h.advance(30);
@@ -3316,6 +3347,11 @@ class Node {
   get_width() { return this.width ?? 0; }
   get_height() { return this.height ?? 0; }
   set_think_callback(callback, args) { this.think = () => callback(...args); return this; }
+  set_render_callback(callback, args) {
+    this.renderCallback = callback;
+    this.render = (...layout) => callback(...layout, ...args);
+    return this;
+  }
   set_lut(sprite, index = 1) { this.lut = { sprite, index, enabled: true }; return this; }
   disable_lut() { if (this.lut) this.lut.enabled = false; return this; }
   listen_for_hovers() { return this; }
@@ -3820,6 +3856,34 @@ test('cooking gift highlights stay item-specific and refresh after history, infu
     0, 'use gift history from the current save');
 });
 
+test('farm-sized text popups add a scrollbar only when the compact content actually overflows', () => {
+  const text = 'Farm\nEmpty tilled spots: 0\nReady to harvest: 0\nPlanted, not ready: 504\nUnwatered crops: 0'
+    + '\n\nGreenhouse\nEmpty tilled spots: 1\nReady to harvest: 0\nPlanted, not ready: 24\nUnwatered crops: 0';
+  for (const screenHeight of [270, 240, 239]) {
+    const h = cookingHighlightHarness();
+    h.screen.y = screenHeight;
+    const popup = h.context.__MistriaCompanion_text_popup('Farm status', text);
+    assert.equal(popup.body_text.text, text);
+    assert.ok(popup.backplate.height <= screenHeight - 16);
+    assert.equal(!!popup.mistria_text_scroller, screenHeight < 240);
+    if (!popup.mistria_text_scroller) {
+      assert.ok(popup.body_text.measure().y + 6 <= popup.body.height,
+        'all lines fit with padding, including the exact-fit boundary');
+    }
+  }
+});
+
+test('compact text popups still scroll when narrow-screen wrapping overflows', () => {
+  const h = cookingHighlightHarness();
+  h.screen.x = 180;
+  h.screen.y = 240;
+  const text = 'A long localized crop status line '.repeat(80);
+  const popup = h.context.__MistriaCompanion_text_popup('Farm status', text);
+  assert.equal(popup.body_text.text, text);
+  assert.ok(popup.mistria_text_scroller);
+  assert.ok(popup.backplate.height <= h.screen.y - 16);
+});
+
 test('native cooking gift popup preserves full dish descriptions and all long gift names', () => {
   const h = cookingHighlightHarness();
   const threeLines = 'A complete dish description.\nA second descriptive line.\nA third descriptive line.';
@@ -3899,8 +3963,12 @@ test('cooking popup uses native UI only and prevents duplicate or stale activati
   h.menu.hide_requests = 1;
   h.show();
   assert.equal(h.open.length, 2);
-  assert.doesNotMatch(source, /\b(?:gpu_\w+|draw_camera_\w+|draw_text_with_color|draw_get_\w+)\s*\(/);
-  assert.doesNotMatch(source, /ANCHOR\.custom\s*\(/, 'the failed custom cooking renderer is removed entirely');
+  const mistStart = source.indexOf('function MistriaCompanion_mist_marker_draw(');
+  const mistEnd = source.indexOf('\nfunction MistriaCompanion_refresh_map_markers(', mistStart);
+  assert.ok(mistStart >= 0 && mistEnd > mistStart);
+  const outsideMist = source.slice(0, mistStart) + source.slice(mistEnd);
+  assert.doesNotMatch(outsideMist, /\b(?:gpu_\w+|draw_camera_\w+|draw_text_with_color|draw_get_\w+)\s*\(/);
+  assert.doesNotMatch(outsideMist, /ANCHOR\.custom\s*\(/, 'only the sprite-only Mist Spot renderer uses a custom node');
 });
 
 test('cooking popup explains when no met villagers like the selected dish and does not mark gifts given', () => {
@@ -4411,6 +4479,76 @@ test('Mist Spot lookup reads the active index, including zero, and rejects inval
   assert.equal(lookup(), undefined);
 });
 
+test('Mist Spot rendering preserves a continuous one-artwork-pixel outline despite rounded UI positions', () => {
+  const draws = [];
+  const depths = [];
+  let depth = 42;
+  const context = load([publicName('mist_marker_draw')], {
+    spr_misty_spot_main_closed_idle: 14,
+    sprite_get_width: () => 48,
+    sprite_get_height: () => 40,
+    sprite_get_xoffset: () => 24,
+    sprite_get_yoffset: () => 26,
+    c_black: 0,
+    gpu_get_depth: () => depth,
+    gpu_set_depth: value => { depth = value; depths.push(value); },
+    draw_sprite_ext: (sprite, frame, x, y, scaleX, scaleY, angle, color, alpha) => {
+      draws.push({ sprite, frame, x, y, scaleX, scaleY, angle, color, alpha, depth });
+    },
+  });
+  const marker = new Node();
+  const render = alpha => context.MistriaCompanion_mist_marker_draw(37, 42, 24, 20, 0xffffff, alpha, -7, marker);
+  render(0.4);
+  assert.equal(draws.length, 9);
+  assert.deepEqual(depths, [-6, -7, 42]);
+  assert.equal(depth, 42, 'restore the renderer depth after drawing');
+  const cloud = draws.at(-1);
+  assert.deepEqual(cloud, {
+    sprite: 14, frame: 0, x: 49, y: 55, scaleX: 0.5, scaleY: 0.5,
+    angle: 0, color: 0xffffff, alpha: 0.4, depth: -7,
+  });
+  assert.deepEqual(draws.slice(0, -1).map(edge => [edge.x - cloud.x, edge.y - cloud.y]),
+    [[-0.5, -0.5], [0, -0.5], [0.5, -0.5], [-0.5, 0], [0.5, 0], [-0.5, 0.5], [0, 0.5], [0.5, 0.5]]);
+  for (const edge of draws.slice(0, -1)) {
+    assert.equal(edge.color, 0);
+    assert.equal(edge.depth, -6);
+    assert.equal(edge.alpha, 0.4);
+  }
+
+  // A synthetic stepped silhouette, not game artwork, exercises diagonal corners and concave edges.
+  const pixels = [[2, 0], [1, 1], [2, 1], [3, 1], [0, 2], [2, 2], [3, 2], [4, 2], [1, 3], [2, 3], [3, 4]];
+  const opaque = new Set(pixels.map(([x, y]) => `${x},${y}`));
+  const border = new Set();
+  for (const draw of draws.slice(0, -1)) {
+    const dx = (draw.x - cloud.x) / draw.scaleX;
+    const dy = (draw.y - cloud.y) / draw.scaleY;
+    for (const [x, y] of pixels) {
+      const key = `${x + dx},${y + dy}`;
+      if (!opaque.has(key)) border.add(key);
+    }
+  }
+  const expected = new Set();
+  for (const [x, y] of pixels) {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const key = `${x + dx},${y + dy}`;
+        if (!opaque.has(key)) expected.add(key);
+      }
+    }
+  }
+  assert.deepEqual(border, expected, 'every edge neighbor is covered, with nothing beyond a one-pixel stroke');
+  draws.length = 0;
+  depths.length = 0;
+  render(0);
+  marker.disable();
+  render(1);
+  marker.enable();
+  marker.freed = true;
+  render(1);
+  assert.equal(draws.length, 0, 'hidden, disabled, and freed markers never draw a stale cloud');
+  assert.equal(depths.length, 0);
+});
+
 test('Mist Spots appear in unvisited map areas, link to the wiki, and follow consumption and daily changes', () => {
   const runtime = {
     all_bug_markers_enabled: false, notifications_enabled: false,
@@ -4445,6 +4583,7 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
     MistriaCompanion_capture_npc_context: () => {},
     MistriaCompanion_capture_quest_item_context: () => {},
     MistriaCompanion_capture_museum_wing_context: () => {},
+    MistriaCompanion_mist_marker_draw: () => {},
     MIST_SIGHT_ACTIVE_INDEX: 0,
     __MistriaCompanion_update_museum_label: () => {},
     MIST_SIGHT_LIST: { count: () => spots.length, get: index => spots[index] },
@@ -4462,6 +4601,7 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
     Menu: { Map: 'map', Store: 'store', Crafting: 'crafting' },
     ANCHOR: {
       sprite: parent => { const node = new Node(); parent.children.push(node); return node; },
+      custom: parent => { const node = new Node(); parent.children.push(node); return node; },
       positional: parent => { const node = new Node(); parent.children.push(node); return node; },
       open_menus: { count: () => 0 },
     },
@@ -4482,24 +4622,11 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   const marker = hubs[0].node.board_get('mistria_item_details_mist_marker');
   assert.equal(marker.enabled, true);
   const cloud = marker.board_get('cloud');
-  assert.equal(cloud.sprite, 14, 'use the real world mist cloud, not the Mist Sight skill symbol');
-  assert.notEqual(cloud.lut?.enabled, true, 'the world sprite already contains the correct pink colors');
-  assert.deepEqual([cloud.scale_x, cloud.scale_y], [0.5, 0.5], 'preserve the artwork aspect ratio');
+  assert.equal(cloud.renderCallback, context.MistriaCompanion_mist_marker_draw);
+  assert.deepEqual([cloud.width, cloud.height], [24, 20], 'draw the entire cloud and outline in the same coordinate space');
   assert.deepEqual([marker.width, marker.height], [24, 20], 'provide compact map-sized hover bounds');
-  assert.deepEqual([cloud.x + 24 * (1 - cloud.scale_x), cloud.y + 26 * (1 - cloud.scale_y)], [0, 0],
-    'scaled world-sprite origins must not offset the drawing away from its hover target');
   assert.equal(marker.cache_is_dirty, true, 'late-created positional roots need their native cache initialized');
-  const outline = marker.board_get('outline');
-  assert.equal(outline.length, 8, 'surround the silhouette by one UI pixel, including diagonals');
-  assert.deepEqual(Array.from(outline, node => [node.x - cloud.x, node.y - cloud.y]),
-    [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]);
-  for (const edge of outline) {
-    assert.equal(edge.sprite, cloud.sprite);
-    assert.equal(edge.color, 0);
-    assert.ok(edge.z > cloud.z, 'outline silhouettes draw behind the untouched pink artwork');
-    assert.deepEqual([edge.scale_x, edge.scale_y], [0.5, 0.5]);
-  }
-  assert.notEqual(cloud.color, 0);
+  assert.equal(marker.children.length, 1, 'no separately rounded sprite copies surround the cloud');
   assert.deepEqual([marker.x, marker.y], [-10, 10]);
   for (const [x, y] of [[195, 145], [0, 0], [0, 145], [195, 0]]) {
     hubs[0].node.set_xy(x, y);
@@ -4519,11 +4646,10 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   assert.equal(context.MIST_SIGHT_ACTIVE_INDEX, 0, 'revealing does not consume the spot');
   refresh();
   assert.equal(queueCount, 1, 'unchanged snapshots do not rebuild markers');
-  cloud.set_lut(context.COMMON_LUT);
   runtime.map_signature = '';
   refresh();
   assert.equal(marker.board_get('cloud'), cloud);
-  assert.equal(cloud.lut.enabled, false, 'reused markers preserve the cloud artwork without recoloring it');
+  assert.equal(cloud.renderCallback, context.MistriaCompanion_mist_marker_draw, 'refreshes preserve the sprite-only renderer');
   marker.hovered = true;
   context.MistriaCompanion_open_wiki();
   assert.deepEqual(clipboard, ['https://fieldsofmistria.wiki.gg/wiki/Mist_Spot']);
@@ -4873,7 +4999,7 @@ function digNoticeHarness() {
   const runtime = {
     dig_spot_visit_key: '', dig_spot_delay: 0, dig_spots: [], notifications_enabled: true,
   };
-  const state = { visit: 'day:area:floor:visit', location: 'The Narrows', toastMenuAvailable: true, duplicate: false };
+  const state = { visit: 'day:area:floor:visit', toastMenuAvailable: true, duplicate: false };
   const messages = [];
   const toasts = [];
   const warnings = [];
@@ -4898,7 +5024,7 @@ function digNoticeHarness() {
   ].map(publicName)), {
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_dig_spot_visit_key: () => state.visit,
-    __MistriaCompanion_dig_spot_location_name: () => state.location,
+    __MistriaCompanion_dig_spot_location_name: () => assert.fail('dig notices must not request a location or floor label'),
     MIST: { running: false },
     PAUSE_STATUS: 0,
     PauseStatus: { CUTSCENE: 1 },
@@ -4950,7 +5076,7 @@ test('dig scans and map data continue during cutscenes, but notices wait for a c
   h.wait(12);
   assert.equal(h.messages.length, 0);
   h.show();
-  assert.deepEqual(h.messages, [{ text: 'Dig spots: 2 - The Narrows', duck: 180 }]);
+  assert.deepEqual(h.messages, [{ text: 'Dig spots: 2', duck: 180 }]);
   h.wait(100);
   assert.equal(h.messages.length, 1, 'a finished scan does not send the notice repeatedly');
 });
@@ -5010,12 +5136,11 @@ test('dig notices from a previous area, day, floor, or grid are discarded', () =
   const h = digNoticeHarness();
   h.scan();
   h.state.visit = 'new area';
-  h.state.location = 'Eastern Road';
   h.detect();
   assert.equal(h.runtime.dig_spot_notice, undefined, 'visit reset drops the prior notice before scanning');
   h.detect();
   h.wait(13);
-  assert.equal(h.messages[0].text, 'Dig spots: 2 - Eastern Road');
+  assert.equal(h.messages[0].text, 'Dig spots: 2');
 });
 
 test('deferred dig notices count only remaining active sites and omit an empty area', () => {
@@ -5023,7 +5148,7 @@ test('deferred dig notices count only remaining active sites and omit an empty a
   h.scan();
   h.grid.node_object_id[2] = 'other';
   h.wait(13);
-  assert.equal(h.messages[0].text, 'Dig spots: 1 - The Narrows');
+  assert.equal(h.messages[0].text, 'Dig spots: 1');
   const empty = digNoticeHarness();
   empty.scan();
   empty.grid.node_object_id.fill('other');

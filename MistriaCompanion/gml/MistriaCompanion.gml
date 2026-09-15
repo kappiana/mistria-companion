@@ -943,7 +943,7 @@ function MistriaCompanion_show_dig_spot_notice() {
         return;
     }
     var _shown = _menu.create_notification(ANCHOR.wrap_for_local(
-        "Dig spots: " + string(_count) + " - " + __MistriaCompanion_dig_spot_location_name()), 60 * 3);
+        "Dig spots: " + string(_count)), 60 * 3);
     if (_shown) {
         var _node = _menu.toasts.last();
         _node.set_think_callback(MistriaCompanion_dig_notice_think, [_node]);
@@ -1254,14 +1254,6 @@ function MistriaCompanion_track_local_spawns() {
             if (_new) _local.notice_wait = 12;
         }
     }
-    // Keep catches in a deferred report, but discard uncaught despawns.
-    var _caught = __MistriaCompanion_local_species_rows(_local.caught);
-    for (var _index = 0; _index < array_length(_caught); _index++) {
-        var _key = string(_caught[_index].item_id);
-        if (_runtime.notifications_enabled && __MistriaCompanion_field(_local.pending_bugs, _key) == true) {
-            _pending_bugs[$ _key] = true;
-        }
-    }
     for (var _index = 0; _index < array_length(_fish); _index++) {
         var _item_id = _fish[_index].item_id;
         var _key = string(_item_id);
@@ -1281,11 +1273,6 @@ function __MistriaCompanion_local_sightings_report(_pending=undefined) {
     var _local = __MistriaCompanion_update_local_sightings();
     if (_local == undefined || FISH == undefined) return undefined;
     var _report = __MistriaCompanion_live_sightings();
-    var _caught = __MistriaCompanion_local_species_rows(_local.caught);
-    for (var _index = 0; _index < array_length(_caught); _index++) {
-        var _entry = _caught[_index];
-        __MistriaCompanion_add_local_species(_report.bugs, _entry.item_id, 0, _entry.caught);
-    }
     var _bugs = __MistriaCompanion_local_species_rows(_report.bugs);
     var _fish = __MistriaCompanion_local_species_rows(_report.fish);
     var _items = global[$ "__item_data"];
@@ -1300,7 +1287,7 @@ function __MistriaCompanion_local_sightings_report(_pending=undefined) {
             && __MistriaCompanion_field(_pending.bugs, string(_entry.item_id)) != true) continue;
         if (_text != "") _text += "\n";
         _text += __MistriaCompanion_name(_items[_entry.item_id]) + ": "
-            + string(_entry.active) + " active, " + string(_entry.caught) + " caught";
+            + string(_entry.active);
         _included++;
     }
     for (var _index = 0; _index < array_length(_fish); _index++) {
@@ -1315,7 +1302,7 @@ function __MistriaCompanion_local_sightings_report(_pending=undefined) {
     if (_included == 0) {
         if (_pending != undefined) return "";
         if (_text != "") _text += "\n";
-        _text += "No active or caught bugs this visit. No legendary fish active here.";
+        _text += "No bugs here. No legendary fish active here.";
     }
     return _text;
 }
@@ -1671,8 +1658,7 @@ function MistriaCompanion_show_farm_status() {
         __MistriaCompanion_notify("Farm status data is not ready. Try again after the game finishes loading.", 60 * 3);
         return;
     }
-    var _text = __MistriaCompanion_farm_status_section("Combined totals", _report.total)
-        + "\n\n" + __MistriaCompanion_farm_status_section("Farm", _report.farm)
+    var _text = __MistriaCompanion_farm_status_section("Farm", _report.farm)
         + "\n\n" + __MistriaCompanion_farm_status_section("Greenhouse", _report.greenhouse);
     if (_report.greenhouse_count == 0) _text += "\nNo greenhouse built.";
     var _popup = __MistriaCompanion_text_popup("Farm status", _text);
@@ -2406,6 +2392,27 @@ function MistriaCompanion_mist_marker_think(_marker, _hub, _map) {
     _marker.set_xy(_x - _hub.get_x(), _y - _hub.get_y()).set_alpha(1);
 }
 
+function MistriaCompanion_mist_marker_draw(_x, _y, _width, _height, _color, _alpha, _z, _marker) {
+    if (_marker.freed || !_marker.get_enabled() || _alpha <= 0) return;
+    var _sprite = spr_misty_spot_main_closed_idle;
+    var _scale_x = _width / sprite_get_width(_sprite);
+    var _scale_y = _height / sprite_get_height(_sprite);
+    _x += sprite_get_xoffset(_sprite) * _scale_x;
+    _y += sprite_get_yoffset(_sprite) * _scale_y;
+    var _depth = gpu_get_depth();
+    gpu_set_depth(_z + 1);
+    // Anchor rounds node positions; apply the one-artwork-pixel stroke at draw time instead.
+    var _offsets = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+    for (var _index = 0; _index < array_length(_offsets); _index++) {
+        draw_sprite_ext(_sprite, 0,
+            _x + _offsets[_index][0] * _scale_x, _y + _offsets[_index][1] * _scale_y,
+            _scale_x, _scale_y, 0, c_black, _alpha);
+    }
+    gpu_set_depth(_z);
+    draw_sprite_ext(_sprite, 0, _x, _y, _scale_x, _scale_y, 0, _color, _alpha);
+    gpu_set_depth(_depth);
+}
+
 function __MistriaCompanion_create_mist_marker(_parent, _map) {
     var _sprite = spr_misty_spot_main_closed_idle;
     var _scale = 0.5;
@@ -2413,19 +2420,8 @@ function __MistriaCompanion_create_mist_marker(_parent, _map) {
         .set_size(sprite_get_width(_sprite) * _scale, sprite_get_height(_sprite) * _scale)
         .listen_for_hovers();
     _marker.cache_is_dirty = true;
-    // Anchor adds unscaled sprite origins; compensate to keep the cloud inside its hover bounds.
-    var _x = sprite_get_xoffset(_sprite) * (_scale - 1);
-    var _y = sprite_get_yoffset(_sprite) * (_scale - 1);
-    var _offsets = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
-    var _outline = [];
-    for (var _index = 0; _index < array_length(_offsets); _index++) {
-        array_push(_outline, ANCHOR.sprite(_marker).set_sprite(_sprite).set_scale(_scale, _scale)
-            .set_xy(_x + _offsets[_index][0], _y + _offsets[_index][1])
-            .set_color(c_black).set_z(1).disable_lut());
-    }
-    var _cloud = ANCHOR.sprite(_marker).set_sprite(_sprite).set_scale(_scale, _scale)
-        .set_xy(_x, _y).set_z(0).disable_lut();
-    _marker.board_set("outline", _outline);
+    var _cloud = ANCHOR.custom(_marker).set_size(_marker.get_width(), _marker.get_height())
+        .set_render_callback(MistriaCompanion_mist_marker_draw, [_marker]);
     _marker.board_set("cloud", _cloud);
     _marker.board_set("label", __MistriaCompanion_hover_label(_marker));
     _marker.set_think_callback(MistriaCompanion_mist_marker_think, [_marker, _parent, _map]);
@@ -2565,7 +2561,6 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
                 _hub.node.board_set("mistria_item_details_mist_marker", _mist_marker);
             }
             _mist_marker.board_get("label").set_text("Mist Spot");
-            _mist_marker.board_get("cloud").disable_lut();
             _mist_marker.enable();
             array_push(_runtime.map_wiki_nodes, { node: _mist_marker, title: "Mist Spot" });
         } else if (_mist_marker != undefined) {
@@ -3436,16 +3431,26 @@ function __MistriaCompanion_text_popup(_title, _text) {
         _popup.body_text.disable();
         ANCHOR.free_node(_popup.body_text);
         _popup.body.set_height(_height);
-        var _root = ANCHOR.positional(_popup.body)
-            .set_xy(4, 4).set_size(_popup.body.get_width() - 8, _height - 8);
-        var _scroller = create_scroller(_root);
-        _popup.mistria_text_scroller = _scroller;
-        var _element = _scroller.new_element(16);
-        _popup.body_text = ANCHOR.text(_element)
-            .set_xy(3, 1).set_max_width(_root.get_width() - 12)
+        _popup.body_text = ANCHOR.text(_popup.body)
+            .set_xy(4, 3).set_max_width(_popup.body.get_width() - 8)
             .allow_line_breaks().set_lut(COMMON_LUT).set_text(_contents);
-        _scroller.add_height_to_element(_element, max(0, _popup.body_text.measure().y + 2 - 16));
-        _root.set_think_callback(MistriaCompanion_text_popup_scroll, [_popup]);
+        var _text_height = _popup.body_text.measure().y + 6;
+        if (_text_height <= _height) {
+            _popup.body.set_height(_text_height);
+        } else {
+            _popup.body_text.disable();
+            ANCHOR.free_node(_popup.body_text);
+            var _root = ANCHOR.positional(_popup.body)
+                .set_xy(4, 4).set_size(_popup.body.get_width() - 8, _height - 8);
+            var _scroller = create_scroller(_root);
+            _popup.mistria_text_scroller = _scroller;
+            var _element = _scroller.new_element(16);
+            _popup.body_text = ANCHOR.text(_element)
+                .set_xy(3, 1).set_max_width(_root.get_width() - 12)
+                .allow_line_breaks().set_lut(COMMON_LUT).set_text(_contents);
+            _scroller.add_height_to_element(_element, max(0, _popup.body_text.measure().y + 2 - 16));
+            _root.set_think_callback(MistriaCompanion_text_popup_scroll, [_popup]);
+        }
         _popup.refresh_backplate_height();
     }
     return _popup;

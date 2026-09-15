@@ -15,7 +15,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Shows villager names when hovering known NPC map markers.
 - Displays today's birthdays and the companion's clock-pause status below the visible vitals and status-effect icons.
 - Offers optional combined alerts for all bug species and legendary fish.
-- Shows one combined local F6 notice for active bugs, bugs caught during the current visit, and currently active legendary fish.
+- Shows one combined local F6 notice for bugs and legendary fish currently present.
 - Groups active bugs into one marker per map hub, with species and counts on hover and ordinary bugs shown by default.
 - Optionally announces active dig spots when entering a location or mine floor and marks their general areas at the nearest map hubs.
 - Optionally announces the number of diving spots when entering an area.
@@ -137,8 +137,8 @@ the F8/F9/F10 preferences, the clock pause does not carry over to a new session.
 
 ## Farm status
 
-Press **F4** during gameplay to open a farm-status menu. It shows **combined
-totals**, followed by separate **Farm** and **Greenhouse** sections:
+Press **F4** during gameplay to open a farm-status menu. It shows separate
+**Farm** and **Greenhouse** sections:
 
 - Empty tilled spots.
 - Plants ready to harvest.
@@ -147,8 +147,8 @@ totals**, followed by separate **Farm** and **Greenhouse** sections:
 
 The menu uses a fresh snapshot each time it opens, including the greenhouse
 when you are elsewhere. It does not harvest, water, plant, or change anything.
-Close the menu and reopen it to refresh the counts. Long reports scroll using
-the same native menu controls as gift details.
+Close the menu and reopen it to refresh the counts. Reports that fit have no
+scrollbar; longer reports scroll using the same native menu controls as gift details.
 
 Plant counts refer to crop plants on tilled soil, not how many items they will
 yield. Fruit trees and wild forage on untilled ground are excluded. Wilted plants
@@ -340,7 +340,7 @@ spawns and visits rather than replaying old notices.
 
 With alerts enabled, entering an area or mine floor with bugs shows **one combined
 left-side notification**, using the same layout as F6: each bug
-species' **active** and **caught** counts, and any active legendary fish. It includes
+species' current count as `Name: count`, and any active legendary fish. It includes
 ordinary, rare, and very rare bugs, regardless of your F9 map-marker setting.
 Only notices inside the mines have a location heading, including the floor number.
 
@@ -349,7 +349,7 @@ see the full list again.
 
 If a **new bug species** is discovered later during that visit, including from
 breaking rocks, a small update shows **only that species**, such as
-`Moth: 1 active, 0 caught`. More bugs of an already seen species or catching bugs
+`Moth: 1`. More bugs of an already seen species or catching bugs
 do not trigger extra notices. A newly spotted legendary fish gets a small update
 too, once per fish species and location per day.
 
@@ -363,7 +363,7 @@ F6 before an automatic notice appears shows the report without a duplicate after
 Automatic notices wait for menus, cutscenes, and dialogue to finish, but appear
 **alongside other notifications**, in their own space below them, instead of
 waiting for the whole notification queue to clear. Deferred reports use fresh
-counts: uncaught despawns and fish no longer present are excluded. Empty areas do
+counts: caught or despawned bugs and fish no longer present are excluded. Empty areas do
 not produce automatic notices. Leaving the
 area or turning F10 off discards pending automatic notices.
 Sighting notices wait for the actual room transition to finish, so leaving an
@@ -375,7 +375,7 @@ Press **F6** to show one combined notification on the **left side of the screen*
 your **current area or mine floor**, not the day's history from other locations.
 F6 never opens a menu, pauses gameplay, or takes control away from you.
 
-The notice lists every bug species with separate **active** and **caught** counts,
+The notice lists each bug species currently present as `Name: count`,
 plus any legendary fish still active there. Outside the mines, it starts directly
 with the list, without a location heading. Inside the mines, it keeps the location
 and floor-number heading.
@@ -386,13 +386,11 @@ adjust to the space below other notifications. If the screen is temporarily too
 full, the notice hides until there is room without using up its reading time.
 Repeated F6 presses while the notice is visible do not create duplicates.
 
-Caught counts come from actual net catches during this visit, not items bought,
-picked up, or carried in your inventory. Bugs that disappear without being
-caught are excluded. If none of a species remain active or caught, it is not
-listed. Legendary fish that were caught or despawned are not listed.
+Caught or despawned bugs are excluded, and species with none remaining are not
+listed. Inventory contents do not affect the counts. Legendary fish that were
+caught or despawned are not listed.
 
-Catch counts reset when you leave the area, change mine floors, start a new day,
-or reload a save. The list is a snapshot taken when you press F6; press it again
+The list is a snapshot taken when you press F6; press it again
 after the notice finishes to refresh. Leaving the area discards the pending
 notice. It waits while a menu or cutscene is active; an on-screen sighting
 notice hides during menus or cutscenes and resumes with its remaining reading
@@ -412,6 +410,7 @@ does not change bug-map visibility.
 
 Active dig spots are counted once after each location or mine floor finishes
 loading. F10 controls the optional count notification, not scanning or map markers.
+The notification shows only **Dig spots: N**, without a location or floor label.
 On the map, full-color **mistril shovel** markers group nearby dig spots at map
 hubs, keeping the same icon size as before. Hover a
 marker to see the count. Used spots disappear from that count.
@@ -438,7 +437,7 @@ alerts, enabling F10 mid-visit does not replay an old entry count.
 ### Daily Mist Spot
 
 The active daily **Mist Spot** uses the actual pink mist-cloud artwork seen in
-the world, scaled down for the map with a black outline—not the Mist Sight skill
+the world, scaled down for the map with a continuous, thin black outline—not the Mist Sight skill
 symbol. The marker stays inside the map image and appears only on the area tab
 that contains the spot, not on neighboring-area exits.
 Browse the map's area tabs to locate it; you do not need to visit its area first.
