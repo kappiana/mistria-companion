@@ -7,7 +7,7 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Shows compact cooking or crafting recipe summaries for a hovered item.
 - Lists met villagers' gift preferences and highlights items already given, keeping individual completion lists for Likeable/Loveable dishes and short Everyone summaries for unlisted universal treats.
 - Adds a cooking-station Gifts button with full liked/loved lists and gift-history highlights for the selected dish.
-- Adds a chest button that grabs one loved gift for each met villager who has not received a gift that day, prioritizing birthdays and available backpack space.
+- Adds a chest button that grabs one loved gift for each eligible met villager: available today, below max hearts, and not yet gifted, prioritizing birthdays and backpack space.
 - Repeats Seed Maker conversions while Interact is held, using the selected stack and normal seed yields.
 - Allows ordinary villager conversations, gifting, quest hand-ins, and Elsie's Gossip while riding your mount, using the normal controls.
 - Copies relevant Fields of Mistria Wiki links for items, villagers, calendar birthdays, quest objectives, Museum wings, and map markers.
@@ -137,7 +137,11 @@ the F8/F9/F10 preferences, the clock pause does not carry over to a new session.
 ### Grab loved gifts from a chest
 
 When a regular chest is open, use the gift button above its inventory to collect
-up to one loved gift per met villager who has not received a gift today.
+up to one loved gift per met, unlocked villager who is **available today**,
+**below max hearts (10)**, and **has not received a gift today**.
+Saturday-market visitors are skipped on days their game schedule keeps them
+away, including when the market is unavailable. Villagers in other regions
+still count; they do not need to be standing near your chest.
 Birthday villagers get priority; then the picker tries to cover as many other
 villagers as your backpack space allows. It accounts for shared preferences,
 partial stacks, and item variants.
@@ -194,6 +198,9 @@ have any, while universal treats with no individual preferences show the short
 
 Select a seed-compatible crop and face a Seed Maker. Tap **Interact** to process
 one item normally, or keep holding it to process more of the same selected stack.
+The action guide reads **Interact (hold to repeat)** while a compatible item is
+selected at the Seed Maker. It keeps the game's actual key or controller-button
+icon, so the hint also works when Interact has been remapped from E.
 Repeating starts after half a second and processes one item every 0.2 seconds
 at the game's normal update rate. Keyboard and controller Interact bindings,
 including remapped controls, work without any additional hotkey or configuration.
@@ -369,7 +376,8 @@ does not change bug-map visibility.
 
 Active dig spots are counted once after each location or mine floor finishes
 loading. F10 controls the optional count notification, not scanning or map markers.
-On the map, outlined shovel markers group nearby dig spots at map hubs. Hover a
+On the map, full-color **mistril shovel** markers group nearby dig spots at map
+hubs, keeping the same icon size as before. Hover a
 marker to see the count. Used spots disappear from that count.
 
 Dig-spot notices wait until cutscenes and NPC dialogue have ended. A deferred
@@ -381,10 +389,12 @@ Scanning and map markers are unaffected.
 
 ### Daily Mist Spot
 
-The active daily **Mist Spot** is shown with the native **Mist Sight** skill icon.
+The active daily **Mist Spot** uses the actual pink mist-cloud artwork seen in
+the world, scaled down for the map—not the Mist Sight skill symbol.
 Browse the map's area tabs to locate it; you do not need to visit its area first.
 The icon marks its nearest map hub, not exact world coordinates. Hover for the
-spot's location name, or press **F7** while hovering to copy its wiki link.
+label **Mist Spot**, without a location name, or press **F7** while hovering to
+copy its wiki link.
 This marker is independent of F9 and F10. It follows the game's active Mist Spot
 state, disappears after the spot is used, and updates when the daily spot changes.
 It does not unlock Mist Sight, create a spot, spend Essence, or change rewards.

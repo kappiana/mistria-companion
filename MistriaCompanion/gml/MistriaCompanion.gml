@@ -6,6 +6,8 @@ function __MistriaCompanion_runtime() {
             keybind_rows: [],
             mounted_interactions_enabled: true,
             seed_repeat: undefined,
+            seed_hint: undefined,
+            seed_hint_visible: false,
             frame: 0,
             clock_paused: false,
             recipe_cache: {},
@@ -71,6 +73,7 @@ function MistriaCompanion_reset_save(_ctx) {
     _runtime.museum_label = undefined;
     _runtime.clock_paused = false;
     _runtime.seed_repeat = undefined;
+    _runtime.seed_hint = undefined;
     _runtime.recipe_cache = {};
     _runtime.wiki_title = "";
     _runtime.wiki_hint_title = "";
@@ -473,6 +476,7 @@ function __MistriaCompanion_seed_interact_held() {
 function __MistriaCompanion_seed_attempt(_force_press=false) {
     var _held = __MistriaCompanion_seed_interact_held();
     var _callback = self.original(_force_press);
+    __MistriaCompanion_record_seed_hint(self);
     var _runtime = __MistriaCompanion_runtime();
     if (_force_press || !_held || !__MistriaCompanion_seed_repeat_ready()
         || !__MistriaCompanion_seed_context_valid(self))
@@ -570,6 +574,52 @@ function MistriaCompanion_update_seed_makers() {
             __MistriaCompanion_install_seed_maker(_renderer);
         }
     }
+    __MistriaCompanion_update_seed_hint();
+}
+
+function __MistriaCompanion_seed_hint_active() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _hint = _runtime.seed_hint;
+    return _hint != undefined && _hint.frame >= _runtime.frame - 1 && _hint.frame <= _runtime.frame
+        && __MistriaCompanion_seed_repeat_ready() && __MistriaCompanion_seed_context_valid(_hint.context)
+        && GRID == _hint.grid && obj_ari.id == _hint.player
+        && obj_ari.x == _hint.x && obj_ari.y == _hint.y && obj_ari.cardinal == _hint.cardinal;
+}
+
+function __MistriaCompanion_update_seed_hint() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _visible = __MistriaCompanion_seed_hint_active();
+    if (!_visible) _runtime.seed_hint = undefined;
+    if (_runtime.seed_hint_visible == _visible) return;
+    _runtime.seed_hint_visible = _visible;
+    var _guide = __MistriaCompanion_menu(Menu.GlyphGuide);
+    if (_guide != undefined) _guide.want_reset = true;
+}
+
+function __MistriaCompanion_record_seed_hint(_context) {
+    var _runtime = __MistriaCompanion_runtime();
+    var _guide = __MistriaCompanion_menu(Menu.GlyphGuide);
+    var _inputs = __MistriaCompanion_field(_guide, "inputs");
+    var _entry = is_array(_inputs) && InputId.Interact < array_length(_inputs)
+        ? _inputs[InputId.Interact] : undefined;
+    if (_entry != undefined && _entry.triggered_this_frame
+        && _entry.local_key == "misc_local/interact"
+        && __MistriaCompanion_seed_repeat_ready() && __MistriaCompanion_seed_context_valid(_context))
+    {
+        _runtime.seed_hint = {
+            context: _context, frame: _runtime.frame, grid: GRID, player: obj_ari.id,
+            x: obj_ari.x, y: obj_ari.y, cardinal: obj_ari.cardinal
+        };
+    } else {
+        _runtime.seed_hint = undefined;
+    }
+    __MistriaCompanion_update_seed_hint();
+}
+
+function MistriaCompanion_seed_interact_label(_value, _key) {
+    if (_key != "misc_local/interact" || !is_string(_value)
+        || !__MistriaCompanion_seed_hint_active()) return undefined;
+    return _value + " (hold to repeat)";
 }
 
 function __MistriaCompanion_keybind_names(_names) {
@@ -2087,6 +2137,22 @@ function __MistriaCompanion_active_mist_spot() {
     return _spot;
 }
 
+function __MistriaCompanion_create_mist_marker(_parent) {
+    var _sprite = spr_misty_spot_main_closed_idle;
+    var _scale = 0.5;
+    var _marker = ANCHOR.positional(_parent).set_xy(-10, 10)
+        .set_size(sprite_get_width(_sprite) * _scale, sprite_get_height(_sprite) * _scale)
+        .listen_for_hovers();
+    _marker.cache_is_dirty = true;
+    // Anchor adds unscaled sprite origins; compensate to keep the cloud inside its hover bounds.
+    var _cloud = ANCHOR.sprite(_marker).set_sprite(_sprite).set_scale(_scale, _scale)
+        .set_xy(sprite_get_xoffset(_sprite) * (_scale - 1), sprite_get_yoffset(_sprite) * (_scale - 1))
+        .disable_lut();
+    _marker.board_set("cloud", _cloud);
+    _marker.board_set("label", __MistriaCompanion_hover_label(_marker));
+    return _marker;
+}
+
 function MistriaCompanion_refresh_map_markers(_hubs) {
     var _runtime = __MistriaCompanion_runtime();
     var _bugs = [];
@@ -2197,15 +2263,14 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
         if (_group.digs > 0) {
             if (_dig_marker == undefined) {
                 _dig_marker = ANCHOR.sprite(_hub.node)
-                    .set_sprite(spr_ui_item_tool_rusty_shovel)
-                    .set_outline_sprite(spr_ui_item_tool_rusty_shovel_outline)
-                    .set_xy(10, -10).set_lut(COMMON_LUT).listen_for_hovers();
+                    .set_xy(10, -10).listen_for_hovers();
                 _dig_marker.board_set("label", __MistriaCompanion_hover_label(_dig_marker));
                 _hub.node.board_set("mistria_item_details_dig_marker", _dig_marker);
             }
             _dig_marker.board_get("label").set_text(
                 _group.digs == 1 ? "Dig spot" : "Dig spots: " + string(_group.digs));
-            _dig_marker.enable();
+            _dig_marker.set_sprite(spr_ui_item_tool_mistril_shovel)
+                .set_outline_sprite(spr_ui_item_tool_mistril_shovel_outline).disable_lut().enable();
         } else if (_dig_marker != undefined) {
             _dig_marker.disable();
             _dig_marker.board_get("label").set_alpha(0);
@@ -2214,14 +2279,11 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
         var _mist_marker = _hub.node.board_get("mistria_item_details_mist_marker");
         if (_group.mist) {
             if (_mist_marker == undefined) {
-                _mist_marker = ANCHOR.sprite(_hub.node)
-                    .set_sprite(spr_ui_skills_archaeology_icon_mist_sight)
-                    .set_xy(-10, 10).set_lut(COMMON_LUT).listen_for_hovers();
-                _mist_marker.board_set("label", __MistriaCompanion_hover_label(_mist_marker));
+                _mist_marker = __MistriaCompanion_create_mist_marker(_hub.node);
                 _hub.node.board_set("mistria_item_details_mist_marker", _mist_marker);
             }
-            _mist_marker.board_get("label").set_text(
-                "Mist Spot\n" + __MistriaCompanion_location_name(_mist.location_id));
+            _mist_marker.board_get("label").set_text("Mist Spot");
+            _mist_marker.board_get("cloud").disable_lut();
             _mist_marker.enable();
             array_push(_runtime.map_wiki_nodes, { node: _mist_marker, title: "Mist Spot" });
         } else if (_mist_marker != undefined) {
@@ -2241,7 +2303,27 @@ function __MistriaCompanion_npc_is_known(_npc_id) {
 }
 
 function __MistriaCompanion_npc_needs_gift(_npc_id) {
-    return __MistriaCompanion_npc_is_known(_npc_id) && NPCS[_npc_id].gift_flag;
+    if (!__MistriaCompanion_npc_is_known(_npc_id) || !NPCS[_npc_id].gift_flag) return false;
+    var _npc = NPCS[_npc_id];
+    var _location = __MistriaCompanion_field(__MistriaCompanion_field(_npc, "location_position"), "location_id");
+    if (!is_array(LOCATIONS) || !is_real(_location) || _location < 0
+        || _location != floor(_location) || _location >= array_length(LOCATIONS)
+        || typeof(__MistriaCompanion_field(_npc, "heart_level")) != "method")
+    {
+        mmapi_warn_rate_limited("mistria_item_details:gift_recipient", "mistria_item_details",
+            "Skipping a gift recipient whose availability or relationship data is not ready.");
+        return false;
+    }
+    // Daily schedules keep absent NPCs in Aldaria; ordinary NPCs are simulated across all other regions.
+    if (_location == LocationId.Aldaria) return false;
+    var _hearts = _npc.heart_level();
+    if (!is_real(_hearts) || _hearts < 0 || _hearts != floor(_hearts)) {
+        mmapi_warn_rate_limited("mistria_item_details:gift_hearts", "mistria_item_details",
+            "Skipping a gift recipient with an invalid heart level.");
+        return false;
+    }
+    // Native Npc.add_heart_points stops accepting friendship points at ten hearts.
+    return _hearts < 10;
 }
 
 function __MistriaCompanion_is_loved_gift(_item, _npc_id) {
@@ -2719,14 +2801,14 @@ function MistriaCompanion_collect_loved_gifts(_menu) {
     var _gift_plan = __MistriaCompanion_gift_plan(_chest_inventory);
     if (_gift_plan.eligible_count == 0) {
         create_notification(
-            ANCHOR.wrap_for_local("Every met villager has already received a gift today."),
+            ANCHOR.wrap_for_local("No eligible gift recipients today: villagers may be unavailable, at max hearts, or already gifted."),
             60 * 3
         );
         return;
     }
     if (_gift_plan.matched_count == 0) {
         create_notification(
-            ANCHOR.wrap_for_local("This chest has no loved gifts for ungifted villagers."),
+            ANCHOR.wrap_for_local("This chest has no loved gifts for eligible villagers."),
             60 * 3
         );
         return;
@@ -2735,6 +2817,7 @@ function MistriaCompanion_collect_loved_gifts(_menu) {
     var _moved = 0;
     for (var _index = 0; _index < array_length(_gift_plan.entries); _index++) {
         var _entry = _gift_plan.entries[_index];
+        if (!__MistriaCompanion_npc_needs_gift(_entry.npc_id)) continue;
         var _slot = _chest_inventory.slot(_entry.slot_index);
         if (_slot.count <= 0 || _slot.item == undefined) continue;
         if (!_slot.item.partial_eq(_entry.item)) continue;
@@ -2750,7 +2833,7 @@ function MistriaCompanion_collect_loved_gifts(_menu) {
 
     var _message = "Grabbed " + string(_moved) + " loved gift" + (_moved == 1 ? "" : "s") + ".";
     if (_moved < array_length(_gift_plan.entries)) {
-        _message += " Some planned transfers no longer fit or the chest changed.";
+        _message += " Some planned gifts are no longer needed or could not be moved.";
     } else if (_moved == 0 && !_gift_plan.search_limited) {
         _message = "No loved gifts fit in your backpack.";
     } else if (_moved < _gift_plan.matched_count && !_gift_plan.search_limited) {
@@ -3239,6 +3322,8 @@ function MistriaCompanion_tick() {
     MistriaCompanion_update_settings_keybinds();
     if (!__MistriaCompanion_ready()) {
         _runtime.seed_repeat = undefined;
+        _runtime.seed_hint = undefined;
+        __MistriaCompanion_update_seed_hint();
         _runtime.wiki_title = "";
         _runtime.wiki_hint_title = "";
         __MistriaCompanion_update_museum_label(undefined);
@@ -3301,6 +3386,7 @@ function MistriaCompanion_register() {
     if (_runtime.registered) return;
     _runtime.registered = true;
     mmapi_filter("item.display_description", MistriaCompanion_description);
+    mmapi_filter("local.get", MistriaCompanion_seed_interact_label);
     mmapi_filter("clock.time_advance", MistriaCompanion_clock_advance);
     mmapi_on("save.game_loaded", MistriaCompanion_reset_save);
     mmapi_on("game.title_entered", MistriaCompanion_reset_save);
@@ -3310,5 +3396,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.48");
+mmapi_mod_declare("mistria_item_details", "1.0.49");
 MistriaCompanion_register();
