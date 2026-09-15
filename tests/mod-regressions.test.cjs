@@ -65,6 +65,7 @@ const search = load(searchNames);
 
 function seedMakerHarness() {
   const runtime = { frame: 0 };
+  const guide = { inputs: [undefined, undefined], want_reset: false };
   const input = { held: false, pressed: false, muted: false };
   const game = { paused: false, state: 'default', eligible: true, allowPress: true, consume: true };
   const entries = [];
@@ -79,8 +80,13 @@ function seedMakerHarness() {
   const context = load([
     'seed_repeat_ready', 'seed_interaction_index', 'seed_context_valid', 'seed_repeat_valid',
     'seed_action', 'seed_interact_held', 'seed_attempt', 'install_seed_maker',
-  ].map(privateName).concat([publicName('update_seed_makers'), publicName('reset_save')]), {
+    'seed_hint_active', 'update_seed_hint', 'record_seed_hint',
+  ].map(privateName).concat([
+    publicName('update_seed_makers'), publicName('reset_save'), publicName('seed_interact_label'),
+  ]), {
     __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_menu: () => guide,
+    Menu: { GlyphGuide: 'glyph-guide' },
     obj_ari: player, obj_node_renderer: 'renderer',
     ARI: {
       inventory: { slot: index => slots[index] }, held_item_index: 0,
@@ -91,19 +97,19 @@ function seedMakerHarness() {
     MIST: { running: false },
     PlayerState: { Default: 'default', MountDefault: 'mounted' },
     ObjectId: { SeedMaker: 'seed-maker' },
-    InputId: { Interact: 'interact', SecondaryInteract: 'inspect' },
+    InputId: { Interact: 0, SecondaryInteract: 1 },
     BindingType: { Keyboard: 'keyboard', Mouse: 'mouse', GamepadButton: 'pad', GamepadAxis: 'axis' },
     DigitalStatus: { On: 1, Muted: 8 },
     KEYBOARD_INPUTS: [69], MOUSE_BUTTONS: [1], GAMEPAD_BUTTONS: [100],
-    BINDINGS: { bindings: { interact: [{ type: 'keyboard', keycode: 69 }] } },
+    BINDINGS: { bindings: [[{ type: 'keyboard', keycode: 69 }], []] },
     array_index: (values, value) => {
       const index = values.indexOf(value);
       return index < 0 ? undefined : index;
     },
     has_flag: (value, flag) => (value & flag) !== 0,
     INPUT: {
-      check: id => { assert.equal(id, 'interact'); return input.held && !input.muted; },
-      input_overrides: { interact: false },
+      check: id => { assert.equal(id, 0); return input.held && !input.muted; },
+      input_overrides: [false, false],
       raw_keyboard: [0], raw_mouse: [0], raw_gp_buttons: [0],
     },
     game_paused: () => game.paused,
@@ -134,10 +140,10 @@ function seedMakerHarness() {
       && context.ARI.held_item()?.item_id === 17);
     // Furniture.gml registers both the Seed Maker's conversion and its Inspect action.
     const interactions = [{
-      input_id: 'interact', local_key: 'misc_local/interact', callback,
+      input_id: context.InputId.Interact, local_key: 'misc_local/interact', callback,
       can_interact_callback: condition,
     }, {
-      input_id: 'inspect', local_key: 'misc_local/inspect',
+      input_id: context.InputId.SecondaryInteract, local_key: 'misc_local/inspect',
       callback: context.method(renderer, () => {
         assert.equal(context.self, renderer);
         inspections.push(renderer);
@@ -152,7 +158,11 @@ function seedMakerHarness() {
       let output;
       for (const entry of interactions) {
         if (!entry.can_interact_callback()) continue;
-        const secondary = entry.input_id === 'inspect';
+        if (guide.inputs[entry.input_id]?.local_key !== entry.local_key) guide.want_reset = true;
+        guide.inputs[entry.input_id] = {
+          input_id: entry.input_id, local_key: entry.local_key, triggered_this_frame: true,
+        };
+        const secondary = entry.input_id === context.InputId.SecondaryInteract;
         const pressed = secondary ? input.inspectPressed && !input.inspectMuted
           : input.pressed && !input.muted;
         if (pressed) {
@@ -185,6 +195,7 @@ function seedMakerHarness() {
     context.INPUT.raw_keyboard[0] = (held ? context.DigitalStatus.On : 0)
       | (input.muted ? context.DigitalStatus.Muted : 0);
     runtime.frame++;
+    for (const entry of guide.inputs) if (entry) entry.triggered_this_frame = false;
     if (!after) update();
     let result;
     if (selected) {
@@ -196,8 +207,58 @@ function seedMakerHarness() {
   }
   const advance = (count, options) => { for (let i = 0; i < count; i++) frame(options); };
   return { context, runtime, input, game, player, renderer, original, entries, slots,
-    logs, guards, conversions, inspections, makeRenderer, frame, advance, update };
+    logs, guards, conversions, inspections, makeRenderer, frame, advance, update, guide };
 }
+
+test('Seed Maker action hints explain holding without changing native bindings, callbacks, or labels', () => {
+  const h = seedMakerHarness();
+  const label = value => h.context.MistriaCompanion_seed_interact_label(value, 'misc_local/interact');
+  const entries = h.renderer.entries.map(entry => ({ ...entry }));
+  assert.equal(label('Interact'), undefined);
+  h.frame({ held: false });
+  assert.equal(label('Interact'), 'Interact (hold to repeat)');
+  assert.equal(label('Interagir'), 'Interagir (hold to repeat)', 'keep the game-localized action name');
+  assert.equal(h.context.MistriaCompanion_seed_interact_label('Inspect', 'misc_local/inspect'), undefined);
+  assert.equal(label(undefined), undefined);
+  assert.equal(h.guide.inputs[h.context.InputId.Interact].local_key, 'misc_local/interact');
+  assert.deepEqual(h.renderer.entries, entries, 'this is a display filter, not an extra Interact action');
+  assert.equal(h.conversions.length, 0);
+  h.guide.want_reset = false;
+  h.advance(15, { held: false });
+  assert.equal(h.guide.want_reset, false, 'a stable hint must not rebuild the native guide every frame');
+  h.context.BINDINGS.bindings[h.context.InputId.Interact] = [{ type: 'pad', keycode: 100 }];
+  h.frame({ held: false });
+  assert.equal(label('Interact'), 'Interact (hold to repeat)');
+  assert.equal(h.guide.inputs[h.context.InputId.Interact].input_id, h.context.InputId.Interact,
+    'the native glyph still resolves the current keyboard/controller binding');
+  h.frame({ selected: null, held: false });
+  h.frame({ selected: null, held: false });
+  assert.equal(label('Interact'), undefined);
+  assert.equal(h.guide.want_reset, true, 'leaving the target refreshes the guide back to its native label');
+});
+
+test('Seed Maker hold hints clear for unavailable actions, movement, menus, scenes, and save resets', () => {
+  for (const change of [
+    h => { h.player.x++; },
+    h => { h.player.cardinal = 1; },
+    h => { h.game.paused = true; },
+    h => { h.context.MIST.running = true; },
+    h => { h.renderer.exists = false; },
+    h => { h.renderer.attempt_interact = () => undefined; },
+    h => { h.context.MistriaCompanion_reset_save({}); },
+  ]) {
+    const h = seedMakerHarness();
+    h.frame({ held: false });
+    change(h);
+    assert.equal(h.context.MistriaCompanion_seed_interact_label('Interact', 'misc_local/interact'), undefined);
+  }
+  const h = seedMakerHarness();
+  h.frame({ held: false });
+  h.game.eligible = false;
+  h.frame({ held: false });
+  assert.equal(h.context.MistriaCompanion_seed_interact_label('Interact', 'misc_local/interact'), undefined);
+  assert.equal(h.renderer.entries[1].local_key, 'misc_local/inspect');
+});
 
 test('Seed Maker taps stay single and held input repeats at exactly 30 then 12 frame intervals', () => {
   for (const after of [false, true]) {
@@ -227,7 +288,7 @@ test('Seed Maker taps stay single and held input repeats at exactly 30 then 12 f
 test('native Seed Maker Interact and Inspect coexist without disabling repetition', () => {
   const h = seedMakerHarness();
   assert.deepEqual(h.renderer.entries.map(entry => [entry.input_id, entry.local_key]), [
-    ['interact', 'misc_local/interact'], ['inspect', 'misc_local/inspect'],
+    [0, 'misc_local/interact'], [1, 'misc_local/inspect'],
   ]);
   assert.notEqual(h.renderer.attempt_interact, h.original);
   assert.equal(h.logs.length, 0);
@@ -241,18 +302,18 @@ test('Seed Maker held bindings ignore native mute without clearing it or bypassi
   const h = seedMakerHarness();
   const held = h.context.__MistriaCompanion_seed_interact_held;
   h.frame({ pressed: true });
-  assert.equal(h.context.INPUT.check('interact'), false);
+  assert.equal(h.context.INPUT.check(h.context.InputId.Interact), false);
   assert.equal(held(), true);
   const mutedOn = h.context.DigitalStatus.Muted | h.context.DigitalStatus.On;
   assert.equal(h.context.INPUT.raw_keyboard[0], mutedOn, 'do not restore pressed or clear mute');
   h.advance(30);
   assert.equal(h.conversions.length, 2);
   assert.equal(h.context.INPUT.raw_keyboard[0], mutedOn);
-  h.context.INPUT.input_overrides.interact = true;
+  h.context.INPUT.input_overrides[h.context.InputId.Interact] = true;
   assert.equal(held(), false, 'explicit input suppression still blocks repetition');
   h.frame();
   assert.equal(h.runtime.seed_repeat, undefined);
-  h.context.INPUT.input_overrides.interact = false;
+  h.context.INPUT.input_overrides[h.context.InputId.Interact] = false;
   h.advance(60);
   assert.equal(h.conversions.length, 2, 'lifting suppression does not restart a hold');
   h.frame({ held: false });
@@ -267,7 +328,7 @@ test('Seed Maker held lookup follows keyboard, mouse, and controller Interact re
   for (const [type, keycode, raw] of [
     ['keyboard', 69, 'raw_keyboard'], ['mouse', 1, 'raw_mouse'], ['pad', 100, 'raw_gp_buttons'],
   ]) {
-    h.context.BINDINGS.bindings.interact = [undefined, { type, keycode }];
+    h.context.BINDINGS.bindings[h.context.InputId.Interact] = [undefined, { type, keycode }];
     h.context.INPUT[raw][0] = mutedOn;
     assert.equal(held(), true, type);
     assert.equal(h.context.INPUT[raw][0], mutedOn);
@@ -277,14 +338,14 @@ test('Seed Maker held lookup follows keyboard, mouse, and controller Interact re
   }
   h.context.KEYBOARD_INPUTS.push(70);
   h.context.INPUT.raw_keyboard = [mutedOn, 0];
-  h.context.BINDINGS.bindings.interact = [{ type: 'keyboard', keycode: 70 }];
+  h.context.BINDINGS.bindings[h.context.InputId.Interact] = [{ type: 'keyboard', keycode: 70 }];
   assert.equal(held(), false, 'holding E does nothing after Interact is remapped to F');
   h.context.INPUT.raw_keyboard[1] = mutedOn;
   assert.equal(held(), true);
   h.context.INPUT.raw_keyboard[1] = 0;
-  h.context.BINDINGS.bindings.interact = [];
+  h.context.BINDINGS.bindings[h.context.InputId.Interact] = [];
   assert.equal(held(), false, 'unbound Interact does not use a hard-coded key');
-  h.context.BINDINGS.bindings.interact = [{ type: 'axis', keycode: 200 }];
+  h.context.BINDINGS.bindings[h.context.InputId.Interact] = [{ type: 'axis', keycode: 200 }];
   h.context.INPUT.check = () => true;
   assert.equal(held(), true, 'unmuted axis bindings keep the native input result');
 });
@@ -419,7 +480,7 @@ test('Seed Maker repeated conversions respect native eligibility and input guard
     assert.equal(guard.subject, h.renderer);
     assert.equal(guard.interaction, h.renderer.entries[0]);
     assert.equal(guard.local_key, 'misc_local/interact');
-    assert.equal(guard.input_id, 'interact');
+    assert.equal(guard.input_id, h.context.InputId.Interact);
   }
 });
 
@@ -512,7 +573,7 @@ test('changed Seed Maker callbacks and interaction lists cancel holds without ov
     h => { h.renderer.entries[0].callback = () => false; },
     h => { h.renderer.entries[0].can_interact_callback = () => false; },
     h => { h.renderer.entries[0].input_id = 'secondary'; },
-    h => { h.renderer.entries[1].input_id = 'interact'; },
+    h => { h.renderer.entries[1].input_id = h.context.InputId.Interact; },
     h => { h.renderer.entries.push({ ...h.renderer.entries[0] }); },
     h => { h.renderer.interactions = { count: () => 0, get: () => undefined }; },
   ]) {
@@ -722,6 +783,7 @@ function giftTooltipHarness() {
   const Desire = { Loved: 4, Liked: 3, Neutral: 2, Disliked: 1 };
   const Infusion = { Loveable: 1, Likeable: 2 };
   const runtime = { recipe_cache: {} };
+  const warnings = [];
   const npc = (name, loved, met = true, unlocked = true) => ({
     prototype: {
       name, loved_gifts: list(loved ? [0] : []), liked_gifts: list(loved ? [] : [0]),
@@ -729,6 +791,8 @@ function giftTooltipHarness() {
     },
     met, unlocked, has_met() { return this.met; },
     gift_flag: true, gifts_given: new Set(), known_gift_preferences: new Set(),
+    location_position: { location_id: 1 }, hearts: 0, heart_level() { return this.hearts; },
+    birthday: false, is_birthday() { return this.birthday; },
   });
   const npcs = [
     npc('Balor', false), npc('March', true), npc('Olric', true),
@@ -740,7 +804,7 @@ function giftTooltipHarness() {
     entry.gifts_given.contains = entry.gifts_given.has.bind(entry.gifts_given);
   }
   const context = load([
-    'npc_is_known', 'npc_needs_gift', 'gift_desire_for_npc', 'join', 'for_item', 'details_text',
+    'npc_is_known', 'npc_needs_gift', 'gift_npcs', 'gift_desire_for_npc', 'join', 'for_item', 'details_text',
     'compact_gift_text', 'gift_highlight_runs', 'clear_gift_highlights', 'update_gift_highlights',
     'has_listed_gift', 'universal_gift_text', 'cooking_base_text', 'cooking_gift_text',
     'clear_cooking_details', 'update_cooking_details', 'text_popup',
@@ -751,6 +815,7 @@ function giftTooltipHarness() {
     Desire, Infusion, ItemId: { VoidNewt: 100, VoidCake: 101 }, NpcId: { Juniper: 10, Eiland: 11 },
     Menu: { Crafting: 'crafting' }, RecipeContext: { Cooking: 'cooking' },
     NPCS: npcs,
+    LocationId: { Aldaria: 0 }, LOCATIONS: [{}, {}, {}],
     global: {
       __item_data: [{ recipe_key: 'ore' }],
       __npc_prototypes: npcs.map(npc => npc.prototype).concat([{
@@ -768,12 +833,12 @@ function giftTooltipHarness() {
     string_copy: (value, start, count) => Array.from(value).slice(start - 1, start - 1 + count).join(''),
     string_split: (value, separator) => value.split(separator),
     string_replace_all: (value, search, replacement) => value.split(search).join(replacement),
-    mmapi_warn_rate_limited: () => {},
+    mmapi_warn_rate_limited: (...args) => warnings.push(args),
   });
   const describe = (base = 'A rare artifact.') => context.MistriaCompanion_description(base, { item });
   const details = () => context.__MistriaCompanion_for_item(item);
   const runs = (text, value = details()) => Array.from(context.__MistriaCompanion_gift_highlight_runs(text, value));
-  return { context, runtime, npcs, item, Infusion, describe, details, runs, recipeReads: () => recipeReads };
+  return { context, runtime, npcs, item, Infusion, describe, details, runs, warnings, recipeReads: () => recipeReads };
 }
 
 test('gift tooltips omit unmet, locked, and missing NPCs without filtering daily recipients', () => {
@@ -964,6 +1029,7 @@ test('the chest picker retains actual infusion-aware reactions rather than using
   const picker = load(['npc_is_known', 'npc_needs_gift', 'gift_desire_for_npc', 'gift_desire', 'is_loved_gift']
     .map(privateName), {
     NPCS: h.npcs, global: h.context.global,
+    LOCATIONS: h.context.LOCATIONS, LocationId: h.context.LocationId,
     npc_is_unlocked: id => h.npcs[id].unlocked,
     Desire: h.context.Desire, Infusion: h.Infusion, ItemId: h.context.ItemId, NpcId: h.context.NpcId,
   });
@@ -1020,6 +1086,100 @@ test('the chest picker still requires a met, unlocked NPC with a daily gift avai
   assert.equal(needsGift(3), false);
   assert.equal(needsGift(4), false);
   assert.equal(needsGift(999), false);
+});
+
+test('chest recipients follow live daily availability, not whether an NPC instance is in the current room', () => {
+  const h = giftTooltipHarness();
+  const needsGift = h.context.__MistriaCompanion_npc_needs_gift;
+  for (const name of ['Stillwell', 'Darcy', 'Zorel']) {
+    h.npcs[0].prototype.name = name;
+    h.npcs[0].location_position.location_id = h.context.LocationId.Aldaria;
+    assert.equal(needsGift(0), false, `${name} is in the off-world holding area on non-market days`);
+    h.npcs[0].location_position.location_id = 1;
+    assert.equal(needsGift(0), true, `${name}'s Saturday schedule places them in Town`);
+    h.npcs[0].location_position.location_id = h.context.LocationId.Aldaria;
+    assert.equal(needsGift(0), false, 'unavailable market schedules remain excluded even on a Saturday');
+  }
+  h.npcs[0].location_position.location_id = 2;
+  h.context.CURRENT_LOCATION_ID = 1;
+  h.context.instance_exists = () => false;
+  assert.equal(needsGift(0), true, 'regular villagers in another region do not need a loaded actor');
+});
+
+test('chest recipients exclude max hearts, preserve birthday order, and keep completion tooltips unchanged', () => {
+  const h = giftTooltipHarness();
+  const needsGift = h.context.__MistriaCompanion_npc_needs_gift;
+  for (const hearts of [0, 1, 9]) {
+    h.npcs[0].hearts = hearts;
+    assert.equal(needsGift(0), true);
+  }
+  for (const hearts of [10, 11]) {
+    h.npcs[0].hearts = hearts;
+    assert.equal(needsGift(0), false);
+  }
+  h.npcs[0].birthday = true;
+  h.npcs[2].birthday = true;
+  assert.deepEqual(Array.from(h.context.__MistriaCompanion_gift_npcs()), [2, 1],
+    'max hearts are excluded even on birthdays, while remaining birthday recipients stay first');
+  h.npcs[2].location_position.location_id = h.context.LocationId.Aldaria;
+  assert.deepEqual(Array.from(h.context.__MistriaCompanion_gift_npcs()), [1]);
+  assert.match(h.describe(), /Liked by: Balor/);
+  assert.match(h.describe(), /Loved by: March, Olric/,
+    'availability and heart caps restrict auto-pickup only, not gift-completion information');
+});
+
+test('unready or malformed recipient data is skipped with an explicit diagnostic', () => {
+  for (const change of [
+    h => { h.npcs[0].location_position = undefined; },
+    h => { h.npcs[0].location_position.location_id = 999; },
+    h => { h.npcs[0].location_position.location_id = -1; },
+    h => { h.npcs[0].location_position.location_id = 1.5; },
+    h => { h.npcs[0].heart_level = undefined; },
+    h => { h.npcs[0].hearts = -1; },
+    h => { h.npcs[0].hearts = '10'; },
+  ]) {
+    const h = giftTooltipHarness();
+    change(h);
+    assert.equal(h.context.__MistriaCompanion_npc_needs_gift(0), false);
+    assert.equal(h.warnings.length, 1);
+  }
+});
+
+test('chest transfers recheck recipient availability and hearts before removing any items', () => {
+  const h = giftTooltipHarness();
+  h.npcs[1].hearts = 10;
+  h.npcs[2].location_position.location_id = h.context.LocationId.Aldaria;
+  let moved = 0;
+  const messages = [];
+  const item = { partial_eq: other => other === item, clone: () => item };
+  const slot = { count: 3, item, remove: count => { slot.count -= count; } };
+  const menu = {
+    left: { slot: () => slot },
+    left_menu: { hand: { size: () => 1, slot: () => ({}) }, refresh() {} },
+    right_menu: { refresh() {} },
+  };
+  const context = load([publicName('collect_loved_gifts')], {
+    Menu: { Storage: 'storage' },
+    ARI: { inventory: { can_add: () => true, add: () => { moved++; return 0; } } },
+    __MistriaCompanion_menu: () => menu,
+    __MistriaCompanion_npc_needs_gift: h.context.__MistriaCompanion_npc_needs_gift,
+    __MistriaCompanion_gift_plan: () => ({
+      eligible_count: 3, matched_count: 3, search_limited: false,
+      entries: [0, 1, 2].map(npc_id => ({ npc_id, slot_index: 0, item })),
+    }),
+    __MistriaCompanion_notify: text => messages.push(text),
+    ANCHOR: { wrap_for_local: text => text }, create_notification: text => messages.push(text),
+  });
+  context.MistriaCompanion_collect_loved_gifts(menu);
+  assert.equal(moved, 1);
+  assert.equal(slot.count, 2);
+  assert.match(messages.at(-1), /^Grabbed 1 loved gift/);
+  assert.match(messages.at(-1), /no longer needed/);
+  context.__MistriaCompanion_gift_plan = () => ({ eligible_count: 0 });
+  context.MistriaCompanion_collect_loved_gifts(menu);
+  assert.match(messages.at(-1), /unavailable, at max hearts, or already gifted/);
+  assert.doesNotMatch(messages.at(-1), /Every met villager has already received/);
+  assert.equal(moved, 1);
 });
 
 test('clock release preserves the incoming engine/filter result and save reset clears ownership', () => {
@@ -2913,6 +3073,8 @@ class Node {
   board_get(key) { return this.board.get(key); }
   board_set(key, value) { this.board.set(key, value); return this; }
   set_xy(x, y) { this.x = x; this.y = y; return this; }
+  set_size(width, height = width) { this.width = width; this.height = height; return this; }
+  set_scale(x, y) { this.scale_x = x; this.scale_y = y; return this; }
   set_lut(sprite, index = 1) { this.lut = { sprite, index, enabled: true }; return this; }
   disable_lut() { if (this.lut) this.lut.enabled = false; return this; }
   listen_for_hovers() { return this; }
@@ -3991,7 +4153,7 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
     return position.location_id === selected ? hubs[0] : 0;
   };
   const context = load([
-    privateName('active_mist_spot'), privateName('hub_index'),
+    privateName('active_mist_spot'), privateName('hub_index'), privateName('create_mist_marker'),
     publicName('refresh_map_markers'), privateName('set_wiki_title'),
     privateName('resolve_wiki_title'), publicName('open_wiki'),
   ], {
@@ -4022,10 +4184,15 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
     Menu: { Map: 'map', Store: 'store', Crafting: 'crafting' },
     ANCHOR: {
       sprite: parent => { const node = new Node(); parent.children.push(node); return node; },
+      positional: parent => { const node = new Node(); parent.children.push(node); return node; },
       open_menus: { count: () => 0 },
     },
     COMMON_LUT: 0,
-    spr_ui_skills_archaeology_icon_mist_sight: 14,
+    spr_misty_spot_main_closed_idle: 14,
+    sprite_get_width: sprite => { assert.equal(sprite, 14); return 48; },
+    sprite_get_height: sprite => { assert.equal(sprite, 14); return 40; },
+    sprite_get_xoffset: sprite => { assert.equal(sprite, 14); return 24; },
+    sprite_get_yoffset: sprite => { assert.equal(sprite, 14); return 26; },
     string_replace_all: (text, from, to) => text.split(from).join(to),
     clipboard_set_text: text => clipboard.push(text),
     mmapi_warn_rate_limited: () => assert.fail('Unexpected invalid Mist Spot data'),
@@ -4035,9 +4202,16 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   refresh();
   const marker = hubs[0].node.board_get('mistria_item_details_mist_marker');
   assert.equal(marker.enabled, true);
-  assert.equal(marker.sprite, 14);
+  const cloud = marker.board_get('cloud');
+  assert.equal(cloud.sprite, 14, 'use the real world mist cloud, not the Mist Sight skill symbol');
+  assert.notEqual(cloud.lut?.enabled, true, 'the world sprite already contains the correct pink colors');
+  assert.deepEqual([cloud.scale_x, cloud.scale_y], [0.5, 0.5], 'preserve the artwork aspect ratio');
+  assert.deepEqual([marker.width, marker.height], [24, 20], 'provide compact map-sized hover bounds');
+  assert.deepEqual([cloud.x + 24 * (1 - cloud.scale_x), cloud.y + 26 * (1 - cloud.scale_y)], [0, 0],
+    'scaled world-sprite origins must not offset the drawing away from its hover target');
+  assert.equal(marker.cache_is_dirty, true, 'late-created positional roots need their native cache initialized');
   assert.deepEqual([marker.x, marker.y], [-10, 10]);
-  assert.equal(marker.board_get('label').text, 'Mist Spot\nArea 1');
+  assert.equal(marker.board_get('label').text, 'Mist Spot');
   assert.equal(marker.board_get('label').alpha, 0);
   assert.equal(routes[0].location_id, 1, 'routes from the spot, not the player');
   assert.equal(routes[0].dyn_index, undefined, 'does not inherit the player dungeon instance');
@@ -4045,6 +4219,11 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   assert.equal(context.MIST_SIGHT_ACTIVE_INDEX, 0, 'revealing does not consume the spot');
   refresh();
   assert.equal(queueCount, 1, 'unchanged snapshots do not rebuild markers');
+  cloud.set_lut(context.COMMON_LUT);
+  runtime.map_signature = '';
+  refresh();
+  assert.equal(marker.board_get('cloud'), cloud);
+  assert.equal(cloud.lut.enabled, false, 'reused markers preserve the cloud artwork without recoloring it');
   marker.hovered = true;
   context.MistriaCompanion_open_wiki();
   assert.deepEqual(clipboard, ['https://fieldsofmistria.wiki.gg/wiki/Mist_Spot']);
@@ -4059,7 +4238,7 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   refresh();
   const next = hubs[0].node.board_get('mistria_item_details_mist_marker');
   assert.equal(next.enabled, true);
-  assert.equal(next.board_get('label').text, 'Mist Spot\nArea 2');
+  assert.equal(next.board_get('label').text, 'Mist Spot', 'the hovered label never includes a location');
 
   context.MIST_SIGHT_ACTIVE_INDEX = undefined;
   refresh();
@@ -4105,8 +4284,8 @@ test('map markers group bug species and counts while preserving native-size hove
     ds_priority_destroy: () => destroyed++,
     ANCHOR: { sprite: parent => { const node = new Node(); parent.children.push(node); return node; } },
     COMMON_LUT: 0,
-    spr_ui_item_tool_rusty_shovel: 12,
-    spr_ui_item_tool_rusty_shovel_outline: 13,
+    spr_ui_item_tool_mistril_shovel: 12,
+    spr_ui_item_tool_mistril_shovel_outline: 13,
   });
   const refresh = () => context.MistriaCompanion_refresh_map_markers(hubs);
   refresh();
@@ -4119,6 +4298,9 @@ test('map markers group bug species and counts while preserving native-size hove
   assert.equal(runtime.map_wiki_nodes[0].title, 'Bugs');
   assert.deepEqual([bug.x, bug.y, dig.x, dig.y], [-10, -10, 10, -10]);
   assert.equal(dig.outline, 13);
+  assert.equal(dig.sprite, 12);
+  assert.notEqual(dig.lut?.enabled, true, 'mistril shovel artwork must not use a text palette');
+  assert.equal(dig.width, undefined, 'keep the native 18x18 sprite size, without resizing or scaling');
   assert.equal(dig.board_get('label').text, 'Dig spots: 2');
   assert.equal(dig.board_get('label').alpha, 0);
   dig.hovered = true;
@@ -4140,6 +4322,10 @@ test('map markers group bug species and counts while preserving native-size hove
   assert.equal(bug.board_get('label').text, 'Ant x1');
   assert.equal(runtime.map_wiki_nodes[0].title, 'Ant');
   bugs = [];
+  dig.set_lut(context.COMMON_LUT);
+  runtime.dig_spots.pop();
+  refresh();
+  assert.equal(dig.lut.enabled, false, 'refreshing an existing dig marker also restores its colors');
   runtime.dig_spots = [];
   refresh();
   assert.equal(bug.enabled, false);
@@ -4164,6 +4350,7 @@ test('a rejected inventory add never removes the source gift and does not claim 
     ARI: { inventory: { can_add: () => true, add: () => remainder } },
     ANCHOR: { wrap_for_local: value => value },
     __MistriaCompanion_menu: () => menu,
+    __MistriaCompanion_npc_needs_gift: () => true,
     __MistriaCompanion_gift_plan: () => ({
       eligible_count: 1, matched_count: 1, search_limited: limited,
       entries: [{ npc_id: 0, slot_index: 0, item }],
@@ -4174,12 +4361,12 @@ test('a rejected inventory add never removes the source gift and does not claim 
   context.MistriaCompanion_collect_loved_gifts(menu);
   assert.equal(removed, 0);
   assert.equal(slot.count, 1);
-  assert.match(messages.at(-1), /planned transfers/);
+  assert.match(messages.at(-1), /planned gifts/);
   assert.doesNotMatch(messages.at(-1), /backpack is full/);
   limited = true;
   context.MistriaCompanion_collect_loved_gifts(menu);
   assert.equal(removed, 0);
-  assert.match(messages.at(-1), /planned transfers.*search limit/);
+  assert.match(messages.at(-1), /planned gifts.*search limit/);
   limited = false;
   remainder = 0;
   context.MistriaCompanion_collect_loved_gifts(menu);
@@ -4621,6 +4808,7 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     MistriaCompanion_update_settings_keybinds: () => {},
     MistriaCompanion_update_gift_tooltips: () => { assert.equal(ready, true); },
     MistriaCompanion_update_seed_makers: () => { assert.equal(ready, true); },
+    __MistriaCompanion_update_seed_hint: () => {},
     MistriaCompanion_track_local_spawns: () => { assert.equal(ready, true); },
     MistriaCompanion_replay_local_sightings: () => { assert.equal(ready, true); },
     MistriaCompanion_update_mounted_interactions: () => {
