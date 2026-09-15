@@ -15,21 +15,30 @@ const configurationDefaults = {
   dig_spot_alerts_enabled: false,
   dig_spot_markers_enabled: true,
   legendary_fish_alerts_enabled: false,
+  autosave_enabled: true,
 };
 const alertPreferenceFunctions = [
   'configuration_options', 'sighting_alerts_enabled', 'any_alerts_enabled', 'apply_alert_preferences',
 ].map(privateName);
+const autosavePreferenceFunctions = [
+  'autosave_interval_valid', 'autosave_interval_setting', 'reset_autosave_timer',
+].map(privateName);
+const autosaveConfigurationFunctions = [
+  privateName('autosave_slider_minutes'),
+  ...['autosave_interval_think', 'set_autosave_interval', 'autosave_slider_think', 'autosave_slider_tap'].map(publicName),
+];
 
-test('v51 manifest and MMAPI registration declare the same version', () => {
+test('v52 manifest and MMAPI registration declare the same version', () => {
   const manifest = JSON.parse(readFileSync(join(__dirname, '..', 'MistriaCompanion', 'manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '1.0.51');
+  assert.equal(manifest.version, '1.0.52');
   assert.ok(source.includes(`mmapi_mod_declare("mistria_item_details", "${manifest.version}");`));
 });
 
 // Execute actual function source, translating only GML struct access and typeof.
-// JS functions stand in for GML methods; method() saves/restores VM self so nested
-// NPC-bound callbacks retain their receiver. This is not a real game VM: engine
-// types/coercion, JSON parsing, native input dispatch, and FSM execution are not simulated.
+// JS functions stand in for GML methods; method() binds JS this and saves/restores
+// VM self so native stand-ins and nested callbacks retain their receiver.
+// This is not a real game VM: engine types/coercion, JSON parsing, native input
+// dispatch, and FSM execution are not simulated.
 function load(names, overrides = {}) {
   const context = vm.createContext({
     array_create: (count, value) => Array(count).fill(value),
@@ -39,6 +48,7 @@ function load(names, overrides = {}) {
     is_array: Array.isArray,
     is_struct: value => value !== null && typeof value === 'object' && !Array.isArray(value),
     is_real: value => typeof value === 'number' && Number.isFinite(value),
+    is_int64: Number.isSafeInteger,
     is_string: value => typeof value === 'string',
     gml_typeof: value => typeof value === 'boolean' ? 'bool'
       : typeof value === 'function' ? 'method' : typeof value,
@@ -46,7 +56,11 @@ function load(names, overrides = {}) {
     max: Math.max,
     ceil: Math.ceil,
     floor: Math.floor,
+    round: Math.round,
+    clamp: (value, lower, upper) => Math.min(upper, Math.max(lower, value)),
     string: String,
+    real: Number,
+    I32_MAX: 2147483647,
     __MistriaCompanion_field: (value, key) => value?.[key],
     ...overrides,
   });
@@ -55,7 +69,7 @@ function load(names, overrides = {}) {
       const previous = context.self;
       context.self = receiver;
       try {
-        return callback(...args);
+        return callback.apply(receiver, args);
       } finally {
         context.self = previous;
       }
@@ -73,6 +87,429 @@ function load(names, overrides = {}) {
   }
   return context;
 }
+
+function autosaveHarness() {
+  const state = {
+    now: 0, ready: true, focused: true, paused: false, dialogue: false, traveling: false,
+    loading: false, playerState: 'default', failSave: false, blockSave: false, checksumMismatch: false,
+  };
+  const files = new Map();
+  const vaults = new Map();
+  const writes = [];
+  const notices = [];
+  const warnings = [];
+  const checksumWarnings = [];
+  const oldPosition = { location_id: 3, pos: { x: 1, y: 2 } };
+  let nextVault = 0;
+  const context = load([
+    privateName('runtime'), ...autosavePreferenceFunctions,
+    ...['autosave_active', 'autosave_safe', 'autosave_stamp', 'write_companion_save'].map(privateName),
+    publicName('update_autosave'), publicName('reset_save'), publicName('quicksave'),
+  ], {
+    global: {},
+    current_time: () => state.now,
+    date_current_datetime: () => 45000 + state.now / 86400000,
+    __MistriaCompanion_ready: () => state.ready,
+    __MistriaCompanion_dig_notice_blocked: () => state.dialogue,
+    __MistriaCompanion_sightings_transition_active: () => state.traveling,
+    window_has_focus: () => state.focused,
+    game_paused: () => state.paused,
+    LOAD_SEQUENCE: { is_active: () => state.loading },
+    ARI: { end_of_day_sequence: false, fire_breath_time: 0, save_position: oldPosition },
+    obj_ari: { x: 160, y: 240, fsm: { current_state_id: () => state.playerState } },
+    PlayerState: { Default: 'default', MountDefault: 'mounted' },
+    Game: { unique_identifier: 123, last_serde_path: 'manual-save' },
+    CURRENT_LOCATION_ID: 2, CURRENT_DYN_INDEX: undefined, DUNGEON_RUNNER: undefined,
+    LOCATIONS: [{}, {}, { serializable: true }],
+    LocationPosition: function(location_id, pos, dyn_index) { Object.assign(this, { location_id, pos, dyn_index }); },
+    Vec2: (x, y) => ({ x, y }),
+    player_wake_position: () => ({ location_id: 0, pos: { x: 50, y: 60 }, dyn_index: undefined }),
+    exact_save_path: (game, manual, slot) => `game-${game}-${manual ? slot : 'autosave'}.sav`,
+    file_exists: path => files.has(path),
+    vault_open_vault: path => {
+      assert.ok(files.has(path), 'only open existing save files');
+      if (files.get(path).unreadable) throw new Error('Unreadable save container');
+      const id = ++nextVault;
+      vaults.set(id, files.get(path));
+      return id;
+    },
+    vault_validate: id => !vaults.get(id).checksumMismatch,
+    vault_load_file: (id, name) => vaults.get(id).malformedRecord === name
+      ? '{' : JSON.stringify(vaults.get(id)[name]),
+    json_parse: JSON.parse,
+    vault_close_vault: id => { assert.ok(vaults.delete(id), 'close each readback vault exactly once'); },
+    save_game: path => {
+      if (state.blockSave) return;
+      context.Game.last_serde_path = path;
+      if (state.failSave) throw new Error('Disk write failed');
+      files.set(path, {
+        info: { last_played: context.date_current_datetime() }, checksumMismatch: state.checksumMismatch,
+        header: {}, gamedata: {}, npcs: {}, quests: {}, game_stats: {}, date_photos: { photos: [] },
+        player: { save_position: structuredClone(context.ARI.save_position) },
+        malformedRecord: state.malformedRecord,
+      });
+      writes.push(path);
+      state.now += state.saveDuration ?? 0;
+    },
+    mmapi_log_warn: (...args) => warnings.push(args),
+    mmapi_warn_rate_limited: (...args) => checksumWarnings.push(args),
+    __MistriaCompanion_notify: text => { notices.push(text); return true; },
+  });
+  const runtime = context.__MistriaCompanion_runtime();
+  const update = context.MistriaCompanion_update_autosave;
+  function advance(ms, step = 1000) {
+    while (ms > 0) {
+      const delta = Math.min(ms, step);
+      state.now += delta;
+      update();
+      ms -= delta;
+    }
+  }
+  update();
+  return { context, runtime, state, files, vaults, writes, notices, warnings, checksumWarnings, oldPosition, update, advance };
+}
+
+test('autosave uses exactly five active-play minutes and repeats in one separate native-loadable slot', () => {
+  const h = autosaveHarness();
+  const nativeAuto = { info: { last_played: 44000 } };
+  const manual = { info: { last_played: 44001 } };
+  h.files.set('game-123-autosave.sav', nativeAuto);
+  h.files.set('game-123-2147483647.sav', manual);
+  h.advance(299999);
+  assert.equal(h.writes.length, 0);
+  h.advance(1);
+  assert.deepEqual(h.writes, ['game-123-2147483648.sav']);
+  assert.equal(h.files.get('game-123-autosave.sav'), nativeAuto);
+  assert.equal(h.files.get('game-123-2147483647.sav'), manual);
+  assert.deepEqual(h.files.get(h.writes[0]).player.save_position,
+    { location_id: 2, pos: { x: 160, y: 240 }, dyn_index: undefined });
+  assert.equal(h.context.ARI.save_position, h.oldPosition);
+  assert.equal(h.notices.at(-1), 'Companion autosaved.');
+  h.advance(300000, 100);
+  assert.deepEqual(h.writes, Array(2).fill('game-123-2147483648.sav'));
+  assert.equal(h.files.size, 3, 'do not accumulate a new manual save every interval');
+  const newest = [...h.files].sort((a, b) => b[1].info.last_played - a[1].info.last_played)[0][0];
+  assert.equal(newest, h.writes[0], 'the native Continue last_played ordering selects the companion save');
+  assert.equal(h.vaults.size, 0);
+});
+
+test('autosave excludes menus, dialogue, transitions, unfocused windows, loading and title time', () => {
+  for (const [key, value] of [
+    ['ready', false], ['focused', false], ['paused', true], ['dialogue', true],
+    ['traveling', true], ['loading', true],
+  ]) {
+    const h = autosaveHarness();
+    h.advance(120000);
+    const previous = h.state[key];
+    h.state[key] = value;
+    h.update();
+    h.advance(600000);
+    assert.equal(h.runtime.autosave_elapsed_ms, 120000, key);
+    assert.equal(h.writes.length, 0, key);
+    h.state[key] = previous;
+    h.update();
+    h.advance(180000);
+    assert.equal(h.writes.length, 1, key);
+  }
+  const h = autosaveHarness();
+  h.context.ARI.end_of_day_sequence = true;
+  h.update();
+  h.advance(300000);
+  assert.equal(h.writes.length, 0);
+  h.context.ARI.end_of_day_sequence = false;
+  h.runtime.clock_paused = true;
+  h.update();
+  h.advance(300000);
+  assert.equal(h.writes.length, 1, 'pausing only the game clock must not pause active-play autosaves');
+});
+
+test('autosave ignores suspend gaps and backward timers and excludes time spent writing the save', () => {
+  const h = autosaveHarness();
+  h.advance(120000);
+  h.state.now += 3600000;
+  h.update();
+  h.state.now -= 20000;
+  h.update();
+  assert.equal(h.runtime.autosave_elapsed_ms, 120000);
+  h.state.saveDuration = 4000;
+  h.advance(180000);
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.runtime.autosave_elapsed_ms, 0);
+  h.advance(299999);
+  assert.equal(h.writes.length, 1);
+  h.advance(1);
+  assert.equal(h.writes.length, 2);
+});
+
+test('autosave counts actions but defers a due save until one quiet second of normal or mounted gameplay', () => {
+  for (const block of [
+    h => { h.state.playerState = 'fishing'; },
+    h => { h.context.obj_ari.fsm.next_state = 'cutscene'; },
+    h => { h.context.ARI.fire_breath_time = 10; },
+  ]) {
+    const h = autosaveHarness();
+    block(h);
+    h.advance(300000);
+    assert.equal(h.runtime.autosave_elapsed_ms, 300000);
+    assert.equal(h.writes.length, 0);
+    h.state.playerState = 'mounted';
+    h.context.obj_ari.fsm.next_state = undefined;
+    h.context.ARI.fire_breath_time = 0;
+    h.advance(999);
+    assert.equal(h.writes.length, 0);
+    h.advance(1);
+    assert.equal(h.writes.length, 1);
+  }
+});
+
+test('autosave preserves dynamic positions and uses a home reload position in mines or nonpersistent areas', () => {
+  for (const area of ['dynamic', 'mines', 'nonpersistent']) {
+    const h = autosaveHarness();
+    h.context.CURRENT_DYN_INDEX = area === 'nonpersistent' ? undefined : 7;
+    if (area === 'mines') h.context.DUNGEON_RUNNER = {};
+    h.context.LOCATIONS[2].serializable = false;
+    h.advance(300000);
+    const position = h.files.get(h.writes[0]).player.save_position;
+    assert.equal(position.location_id, area === 'dynamic' ? 2 : 0);
+    assert.equal(position.dyn_index, area === 'dynamic' ? 7 : undefined);
+    assert.equal(h.notices[0].includes('returns you home'), area !== 'dynamic');
+    assert.equal(h.context.ARI.save_position, h.oldPosition, 'never move the player or change normal save behavior');
+  }
+});
+
+test('autosave load/title resets prevent cross-character timing and disabling prevents all writes', () => {
+  const h = autosaveHarness();
+  h.advance(290000);
+  h.runtime.autosave_interval_minutes = 1;
+  h.context.MistriaCompanion_reset_save({});
+  assert.equal(h.runtime.autosave_elapsed_ms, 0);
+  assert.equal(h.runtime.autosave_interval_minutes, 1);
+  h.context.Game.unique_identifier = 456;
+  h.update();
+  h.advance(60000);
+  assert.deepEqual(h.writes, ['game-456-2147483648.sav']);
+  h.runtime.autosave_enabled = false;
+  h.context.__MistriaCompanion_reset_autosave_timer();
+  h.advance(300000);
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.runtime.autosave_elapsed_ms, 0);
+});
+
+test('autosave failures and vetoes never announce success, preserve position and throttle retries', () => {
+  for (const failure of ['failSave', 'blockSave']) {
+    const h = autosaveHarness();
+    h.advance(300000);
+    const oldSave = h.files.get(h.writes[0]);
+    const oldPath = h.context.Game.last_serde_path;
+    h.state[failure] = true;
+    h.advance(300000);
+    assert.equal(h.files.get(h.writes[0]), oldSave);
+    assert.match(h.notices.at(-1), /Autosave failed/);
+    assert.equal(h.warnings.length, 1);
+    assert.equal(h.context.ARI.save_position, h.oldPosition);
+    assert.equal(h.context.Game.last_serde_path, oldPath);
+    h.advance(59999);
+    assert.equal(h.warnings.length, 1, 'never retry every frame');
+    h.state[failure] = false;
+    h.advance(1);
+    assert.equal(h.writes.length, 2);
+    assert.equal(h.notices.at(-1), 'Companion autosaved.');
+    assert.equal(h.vaults.size, 0);
+  }
+  const first = autosaveHarness();
+  first.state.blockSave = true;
+  first.advance(300000);
+  assert.equal(first.files.size, 0);
+  assert.match(first.notices[0], /Autosave failed/);
+});
+
+test('native checksum warnings do not reject readable autosaves or prevent F11 from updating the existing slot', () => {
+  const h = autosaveHarness();
+  h.state.checksumMismatch = true;
+  h.advance(300000);
+  assert.equal(h.notices.at(-1), 'Companion autosaved.');
+  assert.equal(h.warnings.length, 0);
+  assert.ok(h.checksumWarnings.some(([, , message]) => /checksum\/tamper warning/.test(message)));
+  const first = h.files.get(h.writes[0]);
+  h.context.MistriaCompanion_quicksave();
+  h.advance(1000);
+  assert.equal(h.writes.length, 2);
+  assert.notEqual(h.files.get(h.writes[0]), first, 'a checksum warning must not lock the slot against future saves');
+  assert.equal(h.notices.at(-1), 'Companion saved.');
+  assert.equal(h.context.ARI.save_position, h.oldPosition);
+  assert.equal(h.vaults.size, 0);
+});
+
+test('autosave validates on-disk JSON readback and refuses to overwrite an unreadable existing backup', () => {
+  const h = autosaveHarness();
+  h.state.malformedRecord = 'gamedata';
+  h.advance(300000);
+  assert.match(h.notices.at(-1), /Autosave failed/);
+  assert.match(h.warnings[0][1], /JSON/);
+  assert.equal(h.vaults.size, 0);
+  h.state.malformedRecord = undefined;
+  h.advance(60000);
+  assert.equal(h.writes.length, 1, 'an unreadable existing backup must be reported, not silently overwritten');
+  assert.equal(h.vaults.size, 0);
+});
+
+test('companion save readback requires all core records even when checksum validation passes', () => {
+  for (const name of ['info', 'header', 'gamedata', 'player', 'npcs', 'quests', 'game_stats', 'date_photos']) {
+    for (const invalid of [undefined, null, [], 'not a record']) {
+      const h = autosaveHarness();
+      h.advance(300000);
+      const path = h.writes[0];
+      const damaged = h.files.get(path);
+      damaged[name] = invalid;
+      h.context.MistriaCompanion_quicksave();
+      h.advance(1000);
+      assert.equal(h.writes.length, 1, `${name}: do not replace the damaged existing save`);
+      assert.equal(h.files.get(path), damaged);
+      assert.match(h.notices.at(-1), /Quick save failed/);
+      assert.ok(h.warnings.at(-1)[1].includes(name));
+      assert.equal(h.context.ARI.save_position, h.oldPosition);
+      assert.equal(h.vaults.size, 0);
+    }
+  }
+});
+
+test('companion readback rejects invalid timestamps and unreadable containers without leaking a vault handle', () => {
+  for (const invalid of [undefined, null, true, false, '45000', {}]) {
+    const h = autosaveHarness();
+    h.advance(300000);
+    h.files.get(h.writes[0]).info.last_played = invalid;
+    h.context.MistriaCompanion_quicksave();
+    h.advance(1000);
+    assert.equal(h.writes.length, 1);
+    assert.match(h.warnings.at(-1)[1], /no valid saved timestamp/);
+    assert.equal(h.vaults.size, 0);
+  }
+  const h = autosaveHarness();
+  h.advance(300000);
+  h.files.get(h.writes[0]).unreadable = true;
+  h.context.MistriaCompanion_quicksave();
+  h.advance(1000);
+  assert.match(h.notices.at(-1), /Quick save failed/);
+  assert.match(h.warnings.at(-1)[1], /Unreadable save container/);
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.vaults.size, 0);
+});
+
+test('quick save works with autosave disabled and uses the same mine-to-home reload logic', () => {
+  for (const mines of [false, true]) {
+    const h = autosaveHarness();
+    h.runtime.autosave_enabled = false;
+    h.context.__MistriaCompanion_reset_autosave_timer();
+    h.context.DUNGEON_RUNNER = mines ? {} : undefined;
+    h.context.MistriaCompanion_quicksave();
+    assert.equal(h.runtime.quicksave_requested, true);
+    h.advance(999);
+    assert.equal(h.writes.length, 0);
+    h.advance(1);
+    assert.deepEqual(h.writes, ['game-123-2147483648.sav']);
+    assert.equal(h.files.get(h.writes[0]).player.save_position.location_id, mines ? 0 : 2);
+    assert.equal(h.context.ARI.save_position, h.oldPosition, 'saving never moves the live player');
+    assert.equal(h.runtime.quicksave_requested, false);
+    assert.equal(h.runtime.autosave_enabled, false);
+    assert.equal(h.notices.at(-1), mines
+      ? 'Companion saved. Reloading this save returns you home.' : 'Companion saved.');
+    h.advance(600000);
+    assert.equal(h.writes.length, 1, 'a quick save must not enable timed autosaving');
+  }
+});
+
+test('quick save waits through unsafe actions and pauses and collapses repeated key presses', () => {
+  const h = autosaveHarness();
+  h.runtime.autosave_enabled = false;
+  h.state.playerState = 'fishing';
+  h.context.MistriaCompanion_quicksave();
+  h.context.MistriaCompanion_quicksave();
+  assert.equal(h.notices.length, 1);
+  h.advance(2000);
+  assert.equal(h.writes.length, 0);
+  h.state.paused = true;
+  h.update();
+  h.advance(60000);
+  assert.equal(h.writes.length, 0);
+  h.state.paused = false;
+  h.state.playerState = 'mounted';
+  h.update();
+  h.advance(999);
+  assert.equal(h.writes.length, 0);
+  h.advance(1);
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.runtime.quicksave_requested, false);
+});
+
+test('quick save rejects inactive gameplay with feedback instead of queuing a stale save', () => {
+  for (const [key, value] of [
+    ['ready', false], ['focused', false], ['paused', true],
+    ['dialogue', true], ['traveling', true], ['loading', true],
+  ]) {
+    const h = autosaveHarness();
+    h.runtime.autosave_enabled = false;
+    h.state[key] = value;
+    h.context.MistriaCompanion_quicksave();
+    assert.equal(h.runtime.quicksave_requested, false, key);
+    assert.match(h.notices.at(-1), /Close menus and finish dialogue or traveling/, key);
+    h.advance(10000);
+    assert.equal(h.writes.length, 0, key);
+  }
+});
+
+test('loading a save or returning to title clears an outstanding quick-save request', () => {
+  const h = autosaveHarness();
+  h.runtime.autosave_enabled = false;
+  h.state.playerState = 'fishing';
+  h.context.MistriaCompanion_quicksave();
+  h.context.MistriaCompanion_reset_save({});
+  assert.equal(h.runtime.quicksave_requested, false);
+  h.context.Game.unique_identifier = 456;
+  h.state.playerState = 'default';
+  h.advance(300000);
+  assert.equal(h.writes.length, 0, 'never save a different character for a previous request');
+});
+
+test('quick save updates the autosave slot once and starts a fresh automatic interval', () => {
+  const h = autosaveHarness();
+  h.advance(300000);
+  const firstSave = h.files.get(h.writes[0]);
+  h.advance(299000);
+  h.context.MistriaCompanion_quicksave();
+  h.advance(1000);
+  assert.deepEqual(h.writes, Array(2).fill('game-123-2147483648.sav'));
+  assert.equal(h.files.size, 1);
+  assert.notEqual(h.files.get(h.writes[0]), firstSave);
+  assert.equal(h.notices.at(-1), 'Companion saved.', 'one manual save satisfies an already-due autosave');
+  assert.equal(h.runtime.autosave_elapsed_ms, 0);
+  h.advance(299999);
+  assert.equal(h.writes.length, 2);
+  h.advance(1);
+  assert.equal(h.writes.length, 3);
+  assert.equal(h.notices.at(-1), 'Companion autosaved.');
+});
+
+test('quick-save failure clears the request and permits explicit retries without enabling automatic retries', () => {
+  const h = autosaveHarness();
+  h.runtime.autosave_enabled = false;
+  h.state.failSave = true;
+  h.context.MistriaCompanion_quicksave();
+  h.advance(1000);
+  assert.equal(h.runtime.quicksave_requested, false);
+  assert.equal(h.files.size, 0);
+  assert.match(h.notices.at(-1), /Quick save failed.*press the save key again/);
+  assert.match(h.warnings.at(-1)[1], /Quick save failed/);
+  assert.equal(h.context.ARI.save_position, h.oldPosition);
+  h.advance(1000);
+  assert.equal(h.warnings.length, 1);
+  h.state.failSave = false;
+  h.context.MistriaCompanion_quicksave();
+  h.advance(1000);
+  assert.equal(h.writes.length, 1, 'explicit requests bypass the automatic retry cooldown');
+  assert.equal(h.notices.at(-1), 'Companion saved.');
+  h.advance(60000);
+  assert.equal(h.writes.length, 1);
+});
 
 const searchNames = [
   'gift_slot_cost', 'copy_array', 'gift_assignment_is_better',
@@ -1450,8 +1887,31 @@ test('the farm-status binding preserves old remaps and supports a configurable a
 
 const hotkeyCallbacks = [
   'toggle_clock', 'show_local_sightings', 'open_wiki',
-  'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications', 'show_farm_status',
+  'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications', 'show_farm_status', 'quicksave',
 ];
+
+test('quick-save binding defaults to F11, supports remaps and alternates, and never steals an existing binding', () => {
+  const defaults = mountedConfigHarness({});
+  defaults.register();
+  assert.equal(defaults.runtime.bindings.save, 'F11');
+  assert.equal(defaults.registrations.find(row => row.binding.name === 'F11').callback,
+    defaults.context.MistriaCompanion_quicksave);
+  const remapped = mountedConfigHarness({ save: 'F12', save_alternate: 'SHIFT+F12' });
+  remapped.register();
+  assert.deepEqual(remapped.registrations.filter(row => row.callback === remapped.context.MistriaCompanion_quicksave)
+    .map(row => row.binding.name), ['F12', 'SHIFT+F12']);
+  const collision = mountedConfigHarness({ wiki: 'F11' });
+  collision.register();
+  assert.equal(collision.runtime.bindings.wiki, 'F11');
+  assert.equal(collision.runtime.bindings.save, undefined);
+  assert.ok(collision.warnings.some(([, message]) => /Duplicate binding F11.*save/.test(message)));
+  const store = { value: { __config_version: 1, save: 'F12', save_alternate: 'SHIFT+F12' } };
+  const persisted = preferenceSessionHarness(store);
+  persisted.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), 'autosave_enabled');
+  assert.equal(store.value.save, 'F12');
+  assert.equal(store.value.save_alternate, 'SHIFT+F12');
+  assert.equal(preferenceSessionHarness(store).runtime.bindings.save, 'F12');
+});
 
 function mountedConfigHarness(config) {
   const reads = [];
@@ -1460,6 +1920,7 @@ function mountedConfigHarness(config) {
   const warnings = [];
   const context = load([
     ...alertPreferenceFunctions,
+    ...autosavePreferenceFunctions, ...autosaveConfigurationFunctions,
     privateName('runtime'), privateName('preference'), privateName('mounted_setting'),
     privateName('save_preferences'),
     privateName('hotkey_actions'), privateName('register_hotkeys'), publicName('reset_save'),
@@ -1472,6 +1933,8 @@ function mountedConfigHarness(config) {
     mmapi_config_write: (...args) => writes.push(args),
     mmapi_log_warn: (...args) => warnings.push(args),
     __MistriaCompanion_notify: () => {},
+    string_digits: value => value.replace(/\D/g, ''),
+    string_length: value => value.length,
     mmapi_hotkey_binding_from_name: name => name === '' ? undefined : { name },
     mmapi_hotkey_register_binding: (binding, callback) => registrations.push({ binding, callback }),
   });
@@ -1492,14 +1955,14 @@ test('mounted config defaults enabled and persists explicit boolean values witho
     assert.equal(writes[0][2].mounted_interactions_enabled, expected);
     assert.deepEqual(reads, [['mistria_item_details', 1]]);
     assert.deepEqual(writes[0].slice(0, 2), ['mistria_item_details', 1]);
-    assert.deepEqual(registrations.map(row => row.binding.name), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4']);
+    assert.deepEqual(registrations.map(row => row.binding.name), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4', 'F11']);
     assert.equal(warnings.length, 0);
     context.MistriaCompanion_reset_save({});
     register();
     assert.equal(runtime.mounted_interactions_enabled, expected, 'save reset preserves the configured preference');
     assert.equal(reads.length, 1);
     assert.equal(writes.length, 1);
-    assert.equal(registrations.length, 7);
+    assert.equal(registrations.length, 8);
   }
 });
 
@@ -1540,6 +2003,7 @@ test('mounted config preserves custom primary and alternate keybindings while wr
     bugs: 'INSERT', bugs_alternate: 'SHIFT+INSERT',
     notifications: 'DELETE', notifications_alternate: '',
     farm_status: 'F3', farm_status_alternate: 'SHIFT+F3',
+    save: 'PAGEUP', save_alternate: 'SHIFT+PAGEUP',
   };
   const before = { ...config };
   const { context, runtime, register, reads, writes, registrations, warnings } = mountedConfigHarness(config);
@@ -1549,6 +2013,7 @@ test('mounted config preserves custom primary and alternate keybindings while wr
   assert.deepEqual({ ...writes[0][2] }, {
     ...before, ...configurationDefaults,
     notifications_enabled: false, all_bug_markers_enabled: true, wiki_hints_enabled: true,
+    autosave_interval_minutes: 5,
   });
   assert.equal(reads.length, 1);
   assert.equal(writes.length, 1);
@@ -1596,7 +2061,8 @@ test('fresh and legacy configs default automatic alerts off, all bugs on, and wi
     assert.equal(h.feedback.length, 0, 'startup must not announce default settings');
     assert.equal(h.runtime.bindings.notifications, 'F10');
     assert.equal(h.runtime.keybind_rows[5].title, 'Toggle automatic alerts');
-    assert.equal(h.runtime.keybind_rows.at(-1).title, 'Farm status');
+    assert.equal(h.runtime.keybind_rows[6].title, 'Farm status');
+    assert.equal(h.runtime.keybind_rows.at(-1).title, 'Save to companion slot');
     if (value) {
       assert.equal(h.runtime.mounted_interactions_enabled, false);
       assert.equal(store.value.wiki, 'F11');
@@ -1697,18 +2163,19 @@ test('saving preferences preserves current bindings and mounted configuration an
 function configurationPopupStub() {
   return {
     hide_requests: 0,
+    canvas: { is_unlocked: () => true },
     mistria_configuration_status: { set_text(text) { this.text = text; return this; } },
   };
 }
 
-test('v51 exposes the requested independent switches plus legendary fish alerts', () => {
+test('configuration exposes the independent alert/map switches and autosave', () => {
   const h = preferenceSessionHarness({});
   const options = Array.from(h.context.__MistriaCompanion_configuration_options());
   assert.deepEqual(options.map(option => option.key), Object.keys(configurationDefaults));
   assert.deepEqual(options.map(option => option.title), [
     'Show bug alerts', 'Show bugs on the map', 'Show dive spot alerts',
     'Show mist spots on the map', 'Show dig spot alerts', 'Show dig spots on the map',
-    'Show legendary fish alerts',
+    'Show legendary fish alerts', 'Autosave',
   ]);
   assert.equal(options.filter(option => option.alert).length, 4);
 });
@@ -1740,7 +2207,7 @@ test('v51 migrates legacy alerts without overwriting explicit category choices o
   }
 });
 
-test('all v51 switches validate boolean input and immediately persist independently across saves and sessions', () => {
+test('configuration switches validate boolean input and immediately persist independently across saves and sessions', () => {
   for (const [key, defaultValue] of Object.entries(configurationDefaults)) {
     for (const invalid of ['true', 'false', 0, 1, {}, []]) {
       const h = preferenceSessionHarness({ value: { __config_version: 1, [key]: invalid } });
@@ -1821,6 +2288,99 @@ test('configuration reports save failures and rejects unknown or inactive-menu t
   }
   assert.equal(h.writes.length, writes);
   assert.equal(h.runtime.bug_markers_enabled, false);
+});
+
+test('autosave configuration defaults to five minutes, validates numeric preferences and preserves disabled intervals', () => {
+  for (const invalid of [true, false, '5', 0, -1, 1.5, 2147483648, [], {}]) {
+    const h = preferenceSessionHarness({ value: { __config_version: 1, autosave_interval_minutes: invalid } });
+    assert.equal(h.runtime.autosave_interval_minutes, 5);
+    assert.ok(h.warnings.some(([, text]) => /Invalid autosave_interval_minutes/.test(text)));
+  }
+  for (const minutes of [1, 5, 10, 30]) {
+    const store = { value: { __config_version: 1, autosave_enabled: false, autosave_interval_minutes: minutes } };
+    const h = preferenceSessionHarness(store);
+    assert.equal(h.runtime.autosave_enabled, false);
+    assert.equal(h.runtime.autosave_interval_minutes, minutes);
+    assert.equal(store.value.autosave_interval_minutes, minutes);
+    h.context.MistriaCompanion_toggle_notifications();
+    assert.equal(store.value.autosave_enabled, false, 'F10 controls alerts, never autosave');
+    assert.equal(store.value.autosave_interval_minutes, minutes);
+    h.context.MistriaCompanion_toggle_configuration(configurationPopupStub(), 'autosave_enabled');
+    assert.equal(h.runtime.autosave_enabled, true);
+    assert.equal(h.runtime.autosave_interval_minutes, minutes);
+  }
+});
+
+test('legacy autosave intervals above the slider maximum migrate to 30 minutes with a warning', () => {
+  for (const minutes of [31, 60, 1440, 2147483647]) {
+    const store = { value: { __config_version: 1, autosave_enabled: false, autosave_interval_minutes: minutes } };
+    const h = preferenceSessionHarness(store);
+    assert.equal(h.runtime.autosave_interval_minutes, 30);
+    assert.equal(store.value.autosave_interval_minutes, 30);
+    assert.equal(h.runtime.autosave_enabled, false);
+    assert.ok(h.warnings.some(([, text]) => /exceeds the slider range.*30/.test(text)));
+    const reloaded = preferenceSessionHarness(store);
+    assert.equal(reloaded.runtime.autosave_interval_minutes, 30);
+    assert.equal(reloaded.warnings.length, 0);
+  }
+});
+
+test('autosave interval changes persist, reset the timer, reject invalid values and report write failures', () => {
+  const store = {};
+  const h = preferenceSessionHarness(store);
+  const popup = configurationPopupStub();
+  h.runtime.autosave_elapsed_ms = 290000;
+  h.runtime.autosave_retry_ms = 10000;
+  h.context.MistriaCompanion_set_autosave_interval(2, popup);
+  assert.equal(h.runtime.autosave_interval_minutes, 2);
+  assert.equal(h.runtime.autosave_elapsed_ms, 0);
+  assert.equal(h.runtime.autosave_retry_ms, 0);
+  assert.equal(store.value.autosave_interval_minutes, 2);
+  assert.equal(typeof store.value.autosave_interval_minutes, 'number');
+  assert.equal(preferenceSessionHarness(store).runtime.autosave_interval_minutes, 2);
+  const writes = h.writes.length;
+  for (const value of ['', '2', 0, -1, 1.5, 31, Infinity, NaN, true, false]) {
+    h.context.MistriaCompanion_set_autosave_interval(value, popup);
+    assert.equal(h.runtime.autosave_interval_minutes, 2);
+    assert.match(popup.mistria_configuration_status.text, /Choose whole minutes from 1 to 30/);
+  }
+  assert.equal(h.writes.length, writes);
+  h.runtime.autosave_elapsed_ms = 1234;
+  h.context.MistriaCompanion_set_autosave_interval(2, popup);
+  assert.equal(h.runtime.autosave_elapsed_ms, 1234, 'confirming an unchanged value does not postpone autosaving');
+  store.failWrites = true;
+  h.context.MistriaCompanion_set_autosave_interval(10, popup);
+  assert.equal(h.runtime.autosave_interval_minutes, 10);
+  assert.equal(store.value.autosave_interval_minutes, 2);
+  assert.match(popup.mistria_configuration_status.text, /Not saved/);
+  assert.ok(h.warnings.some(([, text]) => /Autosave interval could not be saved/.test(text)));
+  for (const key of ['close_requested', 'free_requested', 'hide_requests']) {
+    popup[key] = 1;
+    h.context.MistriaCompanion_set_autosave_interval(7, popup);
+    assert.equal(h.runtime.autosave_interval_minutes, 10);
+    popup[key] = 0;
+  }
+  h.runtime.autosave_enabled = false;
+  h.context.MistriaCompanion_set_autosave_interval(7, popup);
+  assert.equal(h.runtime.autosave_interval_minutes, 10);
+});
+
+test('autosave interval rejects boolean members even when field access coerces bool locals to numbers', () => {
+  const h = mountedConfigHarness({});
+  h.context.__MistriaCompanion_field = (value, key) => {
+    const field = value?.[key];
+    return typeof field === 'boolean' ? Number(field) : field;
+  };
+  assert.equal(h.context.__MistriaCompanion_autosave_interval_setting({ autosave_interval_minutes: true }), 5);
+  assert.match(h.warnings.at(-1)[1], /Invalid autosave_interval_minutes/);
+  const store = {};
+  const p = preferenceSessionHarness(store);
+  p.runtime.autosave_interval_minutes = 1;
+  p.context.mmapi_config_write = () => {
+    store.value.autosave_interval_minutes = true;
+  };
+  assert.equal(p.context.__MistriaCompanion_save_preferences(), false);
+  assert.match(p.warnings.at(-1)[1], /Autosave interval could not be saved/);
 });
 
 test('legendary fish tracking returns new observations without emitting separate notices', () => {
@@ -3795,11 +4355,14 @@ function cookingHighlightHarness() {
   const anotherDish = { ...h.item, item_id: 1 };
   const description = renderer.makeBody('');
   const descriptionWrites = [];
-  const nativeSetText = description.set_text.bind(description);
-  description.set_text = text => {
+  // AnchorTextNode.set_text is static/unbound and reads self.text before writing.
+  description.set_text = function(text) {
+    assert.ok(Object.hasOwn(this, 'text'), 'native set_text receiver must have a text field');
+    assert.equal(this, description, 'native set_text must run on the description node');
+    if (typeof text !== 'string') text = String(text);
     descriptionWrites.push(text);
-    description.display_text = text;
-    return nativeSetText(text);
+    this.display_text = text;
+    return Node.prototype.set_text.call(this, text);
   };
   description.parent = Object.assign(new Node(), {
     width: 175, height: 39,
@@ -3944,6 +4507,70 @@ test('cooking quantity refreshes never write companion extras to the visible des
   assert.notEqual(h.description.set_text, setter, 'restore the native setter when leaving cooking');
   h.description.set_text('Unrelated station description');
   assert.equal(h.description.text, 'Unrelated station description');
+});
+
+test('cooking post-sequence refresh binds the native static setter to the hidden description node', () => {
+  const h = cookingHighlightHarness();
+  h.update();
+  const state = h.state();
+  const setter = h.description.set_text;
+  h.menu.hide_requests = 1;
+  h.update();
+  assert.equal(h.description.set_text, setter, 'keep the wrapper while the cooking sequence hides the menu');
+
+  // run_post_sequence resets quantity and refreshes the selected dish before request_show.
+  h.menu.quantity = 1;
+  h.select(h.anotherDish, 'Freshly cooked dish.');
+  assert.equal(h.description.text, 'Freshly cooked dish.');
+  assert.equal(h.description.set_text(h.state().source_text), h.description, 'preserve native chaining');
+  assert.equal(state.item, h.anotherDish);
+  assert.equal(Object.hasOwn(state, 'text'), false, 'never write native text fields onto companion state');
+  assert.equal(Object.hasOwn(state, 'display_text'), false);
+
+  h.menu.hide_requests = 0;
+  h.update();
+  assert.equal(h.state(), state);
+  assert.equal(h.description.set_text, setter);
+  assert.equal(state.button.enabled, true);
+  h.show();
+  assert.equal(h.menu.mistria_gift_popup.item, h.anotherDish);
+});
+
+test('cooking setter passthrough paths retain the native text-node receiver', () => {
+  for (const [name, invalidate, text] of [
+    ['numeric input', () => {}, 42],
+    ['non-cooking context', h => { h.menu.context = 'blacksmithing'; }, 'Another station'],
+    ['replaced description', h => { h.menu.description = h.renderer.makeBody('New node'); }, 'Old node'],
+    ['closing menu', h => { h.menu.close_requested = true; }, 'Closing'],
+    ['free-requested menu', h => { h.menu.free_requested = true; }, 'Free requested'],
+    ['empty selection', h => { h.menu.item = undefined; }, 'No recipe'],
+  ]) {
+    const h = cookingHighlightHarness();
+    h.update();
+    const state = h.state();
+    invalidate(h);
+    assert.equal(h.description.set_text(text), h.description, name);
+    assert.equal(h.description.text, String(text), name);
+    assert.equal(Object.hasOwn(state, 'text'), false, name);
+  }
+});
+
+test('cooking cleanup restores the exact unbound native setter and full description', () => {
+  const h = cookingHighlightHarness();
+  const nativeSetter = h.description.set_text;
+  const fullText = h.description.text;
+  h.update();
+  assert.notEqual(h.description.set_text, nativeSetter);
+  h.menu.context = 'blacksmithing';
+  h.update();
+  assert.equal(h.description.set_text, nativeSetter);
+  assert.equal(h.description.text, fullText);
+  assert.equal(h.description.set_text('Native description'), h.description);
+
+  h.menu.context = 'cooking';
+  h.select(h.item);
+  h.update();
+  assert.equal(h.description.text, 'A finished dish.', 'reinstall safely after returning to cooking');
 });
 
 test('cooking highlights follow live mouse/controller recipe selection, not ingredient tooltips', () => {
@@ -4539,6 +5166,7 @@ function settingsHarness() {
     set_width(width) { this.width = width; return this; }
     set_height(height) { this.height = height; return this; }
     set_y(y) { this.y = y; return this; }
+    set_x(x) { this.x = x; return this; }
     set_max_width(width) { this.maxWidth = width; return this; }
     allow_line_breaks() { return this; }
     get_width() { return this.width; }
@@ -4554,7 +5182,13 @@ function settingsHarness() {
     }
     set_tap_callback(callback, args) { this.tap = () => callback(...args); return this; }
     set_free_callback(callback, args) { this.onFree = () => callback(...args); return this; }
-    is_unlocked() { return this.unlocked; }
+    is_unlocked() { return this.unlocked && this.enabled && (!this.parent || this.parent.is_unlocked()); }
+    set_unlocked(value) { this.unlocked = value; return this; }
+    set_hover_sound(value) { this.hoverSound = value; return this; }
+    mouse_can_escape_tap(value) { this.escapeTap = value; return this; }
+    listen_for_taps() { return this; }
+    in_drag() { return this.dragging === true; }
+    get_position_with_drag_applied() { return { x: this.dragX ?? this.get_x() }; }
     measure() {
       // Deterministic layout stand-in, not the game's font metrics.
       const columns = Math.max(1, Math.floor((this.maxWidth ?? this.width) / 6));
@@ -4574,9 +5208,10 @@ function settingsHarness() {
     node.onFree?.();
     for (const child of node.children) free(child);
   }
-  const runtime = { ...configurationDefaults };
+  const runtime = { ...configurationDefaults, autosave_interval_minutes: 5 };
   const screen = { x: 480, y: 270 };
   const popups = [];
+  const controls = { directional: false };
   const saved = [];
   const menu = {
     journal: { right_full_body: new SettingsNode(185, 211) },
@@ -4590,10 +5225,11 @@ function settingsHarness() {
   const created = [];
   const callbacks = [
     'toggle_clock', 'show_local_sightings', 'open_wiki',
-    'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications', 'show_farm_status',
+    'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications', 'show_farm_status', 'quicksave',
   ];
   const context = load([
     ...alertPreferenceFunctions,
+    ...autosavePreferenceFunctions, ...autosaveConfigurationFunctions,
     privateName('hotkey_actions'), privateName('keybind_names'),
     privateName('settings_keybind_row'), publicName('update_settings_keybinds'),
     ...['show_configuration', 'toggle_configuration', 'configuration_row_think',
@@ -4609,18 +5245,27 @@ function settingsHarness() {
     Cardinal: { North: 'north', South: 'south', East: 'east', West: 'west' },
     COMMON_LUT: 0,
     CommonLutIndex: { Dark: 0, Header: 1 },
+    spr_ui_journal_settings_slider_range: 'slider-range',
+    InputId: { Left: 0, Right: 1 },
+    MOUSE_GUI_X: 0,
     ON_GAMEPAD: false,
     INPUT: { gp_right_stick: { y: 0 } },
     string_replace_all: (text, from, to) => text.split(from).join(to),
+    string_digits: value => value.replace(/\D/g, ''),
+    string_length: value => value.length,
+    text_input_popup: () => assert.fail('the interval slider must never open a modal text-input popup'),
     ANCHOR: {
       text: node, nine_slice: node, positional: node, free_node: free,
       wrap_for_local: text => text,
       get_true_size: () => screen,
       get_active_pilot: () => pilot,
       set_active_pilot: value => { pilot = value; },
+      in_directional_control: () => controls.directional,
+      press_and_hold_reader: { pressed: [0, 0] },
     },
     popup_creator: () => {
       const popup = {
+        canvas: new SettingsNode(),
         backplate: new SettingsNode(180, 0), pilot: newPilot(), new_pilot: newPilot,
         hide_requests: 0, close_requested: false, free_requested: false,
         add_title(title) {
@@ -4685,25 +5330,26 @@ function settingsHarness() {
     title: action.title, bindings: [action.default_key],
   }));
   return {
-    context, runtime, menu, created, actions, screen, popups, saved,
+    context, runtime, menu, created, actions, screen, popups, controls, saved,
     update: context.MistriaCompanion_update_settings_keybinds,
     setPilot: value => { pilot = value; },
   };
 }
 
-test('Settings reference uses all seven registered actions and does not duplicate or replace native pages', () => {
+test('Settings reference uses all eight registered actions and does not duplicate or replace native pages', () => {
   const { actions, runtime, menu, created, update } = settingsHarness();
-  assert.deepEqual(Array.from(actions, action => action.default_key), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4']);
+  assert.deepEqual(Array.from(actions, action => action.default_key), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4', 'F11']);
   assert.equal(actions[3].callback(), 'toggle_wiki_hints');
+  assert.equal(actions[7].callback(), 'quicksave');
   update();
   update();
   assert.equal(created.length, 1);
   const first = menu.option_scroller;
-  assert.equal(first.rows.length, 10);
+  assert.equal(first.rows.length, 11);
   assert.equal(first.rows[0].children[0].text, 'Mistria Companion');
   assert.equal(first.rows[1].children[0].label, 'Configuration');
-  assert.deepEqual(first.rows.slice(2, 9).map(row => row.children[0].text), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4']);
-  assert.deepEqual(first.rows.slice(2, 9).map(row => row.children[1].text), runtime.keybind_rows.map(row => row.title));
+  assert.deepEqual(first.rows.slice(2, 10).map(row => row.children[0].text), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4', 'F11']);
+  assert.deepEqual(first.rows.slice(2, 10).map(row => row.children[1].text), runtime.keybind_rows.map(row => row.title));
   assert.ok(first.rows[1].y + first.rows[1].height <= 211, 'configuration stays above every shortcut');
   const configurationPilot = menu.mistria_configuration_pilot;
   assert.equal(configurationPilot.map[0].length, 1);
@@ -4743,7 +5389,7 @@ test('Settings reference renders alternates and unbound actions with expanding, 
   assert.equal(rows[5].children[0].text, 'Not bound');
   assert.equal(rows[6].children[0].text, 'PAD LEFT SHOULDER + PAD RIGHT TRIGGER');
   assert.ok(rows[6].height > 24);
-  for (const row of rows.slice(2, 9)) {
+  for (const row of rows.slice(2, 10)) {
     for (const label of row.children) assert.ok(label.height + 8 <= row.height);
   }
   for (let i = 1; i < rows.length; i++) {
@@ -4785,10 +5431,10 @@ test('Configuration button opens a native popup above the keybinds with saved, l
   assert.equal(popup.title, 'Mistria Companion configuration');
   assert.equal(popup.closeButton.label, 'misc_local/close');
   const list = h.created[1];
-  assert.equal(list.rows.length, 7);
+  assert.equal(list.rows.length, 9);
   assert.equal(list.pilot, h.context.ANCHOR.get_active_pilot());
   assert.notEqual(list.pilot, popup.closeButton.pilot, 'the scroller never follows a button outside its canvas');
-  assert.deepEqual(list.pilot.map.map(row => row.length), Array(7).fill(1),
+  assert.deepEqual(list.pilot.map.map(row => row.length), Array(9).fill(1),
     'switches use native vertical pilot rows rather than a single horizontal row');
   assert.equal(list.pilot.neighbors.south, popup.closeButton.pilot);
   assert.equal(popup.closeButton.pilot.neighbors.north, list.pilot);
@@ -4828,7 +5474,7 @@ test('configuration layout preserves every row and keeps the viewport and failur
     assert.ok(list.view_height > 0);
     assert.ok(list.parent.y + list.view_height <= popup.mistria_configuration_status.y);
     assert.ok(popup.mistria_configuration_status.y + popup.mistria_configuration_status.height <= popup.body.height);
-    for (const row of list.rows) {
+    for (const row of list.rows.slice(0, -1)) {
       const toggle = row.children[0];
       const title = toggle.children[0];
       const value = toggle.children[1];
@@ -4836,9 +5482,186 @@ test('configuration layout preserves every row and keeps the viewport and failur
       assert.ok(title.x + title.maxWidth < value.x);
       assert.ok(toggle.y + toggle.height <= row.height);
     }
+    const interval = popup.mistria_autosave_interval;
+    assert.ok(interval.label.y + interval.label.height < interval.range.y);
+    assert.ok(interval.range.y + interval.button.height <= interval.plate.height);
+    assert.ok(interval.plate.y + interval.plate.height <= interval.element.height);
+    assert.ok(interval.range.x + interval.range.width < interval.maximum.x);
+    assert.ok(interval.range.width > interval.button.width, 'every viewport has a nonzero slider travel');
+    assert.ok(interval.minimum.y + interval.minimum.height <= interval.plate.height);
+    assert.ok(interval.maximum.y + interval.maximum.height <= interval.plate.height);
     h.context.__MistriaCompanion_save_preferences = () => false;
     list.rows[0].children[0].tap();
     assert.match(popup.mistria_configuration_status.text, /Not saved.*only this session/);
+  }
+});
+
+test('autosave slider is inline, editable only while enabled, and retains its value without trapping menu input', () => {
+  const h = settingsHarness();
+  h.update();
+  const previousPilot = h.context.ANCHOR.get_active_pilot();
+  h.menu.option_scroller.rows[1].children[0].tap();
+  const popup = h.popups[0];
+  const list = h.created[1];
+  const toggle = list.rows[7].children[0];
+  const interval = popup.mistria_autosave_interval;
+  assert.equal(interval.label.text, 'Save every 5 minutes');
+  assert.equal(interval.element.enabled, true);
+  assert.equal(interval.button.unlocked, true);
+  assert.equal(interval.minimum.text, '1');
+  assert.equal(interval.maximum.text, '30');
+  const height = list.bottom;
+  interval.range.cache_x = 100;
+  h.context.MOUSE_GUI_X = 100 + interval.button.width / 2
+    + (interval.range.width - interval.button.width) * 11 / 29;
+  interval.range.tap();
+  assert.equal(h.popups.length, 1, 'changing the interval must not create or lock another popup');
+  assert.equal(h.runtime.autosave_interval_minutes, 12);
+  assert.equal(interval.label.text, 'Save every 12 minutes');
+  assert.equal(h.saved.at(-1).autosave_interval_minutes, 12);
+  h.runtime.autosave_elapsed_ms = 10000;
+  toggle.tap();
+  assert.equal(h.runtime.autosave_elapsed_ms, 0);
+  assert.equal(interval.element.enabled, false);
+  assert.equal(interval.button.unlocked, false, 'controller must skip the hidden interval');
+  assert.equal(interval.element.height, 1, 'collapse the disabled row with the native one-pixel overlap');
+  assert.ok(list.bottom < height);
+  interval.range.tap();
+  assert.equal(h.runtime.autosave_interval_minutes, 12);
+  toggle.tap();
+  assert.equal(interval.element.enabled, true);
+  assert.equal(interval.button.unlocked, true);
+  assert.equal(interval.label.text, 'Save every 12 minutes');
+  assert.equal(list.bottom, height);
+  interval.button.dragging = true;
+  interval.button.dragX = interval.range.width;
+  interval.button.think();
+  assert.equal(interval.preview_minutes, 30);
+  toggle.tap();
+  interval.button.dragging = false;
+  interval.button.think();
+  assert.equal(interval.preview_minutes, undefined);
+  assert.equal(h.runtime.autosave_interval_minutes, 12, 'ignore stale input after autosave was disabled');
+  assert.equal(h.popups.length, 1);
+  assert.equal(popup.closeButton.pilot, list.pilot.neighbors.south, 'Close remains reachable from the slider');
+  popup.close();
+  assert.equal(h.context.ANCHOR.get_active_pilot(), previousPilot);
+  assert.equal(h.menu.option_scroller.canvas.unlocked, true);
+});
+
+test('autosave slider drag previews whole-minute steps and persists only on release', () => {
+  const h = settingsHarness();
+  h.update();
+  h.menu.option_scroller.rows[1].children[0].tap();
+  const popup = h.popups[0];
+  const row = popup.mistria_autosave_interval;
+  const travel = row.range.width - row.button.width;
+  row.button.dragging = true;
+  for (let minutes = 1; minutes <= 30; minutes++) {
+    row.button.dragX = (minutes - 1) / 29 * travel;
+    row.button.think();
+    assert.equal(row.preview_minutes, minutes);
+    assert.equal(row.label.text, `Save every ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`);
+    assert.equal(h.runtime.autosave_interval_minutes, 5, 'drag previews do not commit the setting');
+    assert.equal(h.saved.length, 0, 'do not write config every drag frame');
+    assert.ok(Math.abs(row.button.x - row.button.dragX) < 0.00001);
+  }
+  row.button.dragX = travel * 2;
+  row.button.think();
+  assert.equal(row.preview_minutes, 30);
+  row.button.dragX = -100;
+  row.button.think();
+  assert.equal(row.preview_minutes, 1);
+  row.button.dragging = false;
+  row.button.think();
+  assert.equal(h.runtime.autosave_interval_minutes, 1);
+  assert.equal(h.saved.length, 1);
+  assert.equal(h.saved[0].autosave_interval_minutes, 1);
+  row.button.think();
+  assert.equal(h.saved.length, 1, 'release commits only once');
+});
+
+test('autosave slider track clicks reach every value from 1 through 30 and clamp at either end', () => {
+  const h = settingsHarness();
+  h.update();
+  h.menu.option_scroller.rows[1].children[0].tap();
+  const row = h.popups[0].mistria_autosave_interval;
+  row.range.cache_x = 125;
+  for (let minutes = 1; minutes <= 30; minutes++) {
+    h.context.MOUSE_GUI_X = row.range.cache_x + row.button.width / 2
+      + (minutes - 1) / 29 * (row.range.width - row.button.width);
+    row.range.tap();
+    assert.equal(h.runtime.autosave_interval_minutes, minutes);
+  }
+  h.context.MOUSE_GUI_X = -100;
+  row.range.tap();
+  assert.equal(h.runtime.autosave_interval_minutes, 1);
+  h.context.MOUSE_GUI_X = 10000;
+  row.range.tap();
+  assert.equal(h.runtime.autosave_interval_minutes, 30);
+});
+
+test('autosave slider keyboard and controller input moves one minute at a time without recursive repeats', () => {
+  const h = settingsHarness();
+  h.update();
+  h.menu.option_scroller.rows[1].children[0].tap();
+  const row = h.popups[0].mistria_autosave_interval;
+  h.controls.directional = true;
+  row.button.hovered = true;
+  const pressed = h.context.ANCHOR.press_and_hold_reader.pressed;
+  pressed[h.context.InputId.Right] = 1;
+  row.button.think();
+  assert.equal(h.runtime.autosave_interval_minutes, 6);
+  assert.equal(h.saved.length, 1);
+  row.button.hovered = false;
+  row.button.think();
+  assert.equal(h.runtime.autosave_interval_minutes, 6, 'only the selected slider consumes directional input');
+  row.button.hovered = true;
+  for (let i = 0; i < 40; i++) row.button.think();
+  assert.equal(h.runtime.autosave_interval_minutes, 30);
+  const atMax = h.saved.length;
+  row.button.think();
+  assert.equal(h.saved.length, atMax, 'an unchanged endpoint does not write or reset the timer');
+  pressed[h.context.InputId.Right] = 0;
+  pressed[h.context.InputId.Left] = 1;
+  row.button.think();
+  assert.equal(h.runtime.autosave_interval_minutes, 29);
+  for (let i = 0; i < 40; i++) row.button.think();
+  assert.equal(h.runtime.autosave_interval_minutes, 1);
+});
+
+test('autosave slider honors the parent modal lock and cancels previews on hidden or closing menus', () => {
+  for (const invalidate of [
+    popup => { popup.canvas.unlocked = false; },
+    popup => { popup.hide_requests = 1; },
+    popup => { popup.close_requested = true; },
+    popup => { popup.free_requested = true; },
+  ]) {
+    const h = settingsHarness();
+    h.update();
+    h.menu.option_scroller.rows[1].children[0].tap();
+    const popup = h.popups[0];
+    const row = popup.mistria_autosave_interval;
+    row.button.dragging = true;
+    row.button.dragX = row.range.width;
+    row.button.think();
+    assert.equal(row.preview_minutes, 30);
+    invalidate(popup);
+    h.context.MistriaCompanion_autosave_interval_think(popup);
+    assert.equal(row.button.unlocked, false, 'never unlock a child behind another modal');
+    assert.equal(row.range.unlocked, false);
+    assert.equal(row.preview_minutes, undefined);
+    row.button.dragging = false;
+    row.button.think();
+    row.range.tap();
+    assert.equal(h.runtime.autosave_interval_minutes, 5);
+    assert.equal(h.saved.length, 0);
+    Object.assign(popup, { hide_requests: 0, close_requested: false, free_requested: false });
+    popup.canvas.unlocked = true;
+    h.context.MistriaCompanion_autosave_interval_think(popup);
+    assert.equal(row.button.unlocked, true);
+    assert.equal(row.range.unlocked, true);
+    assert.equal(row.label.text, 'Save every 5 minutes');
   }
 });
 
@@ -5875,6 +6698,7 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_register_hotkeys: () => {},
     MistriaCompanion_update_settings_keybinds: () => {},
+    MistriaCompanion_update_autosave: () => {},
     MistriaCompanion_update_gift_tooltips: () => { assert.equal(ready, true); },
     MistriaCompanion_update_seed_makers: () => { assert.equal(ready, true); },
     __MistriaCompanion_update_seed_hint: () => {},

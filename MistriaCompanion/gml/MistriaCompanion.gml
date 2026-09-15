@@ -22,6 +22,14 @@ function __MistriaCompanion_runtime() {
             bug_markers_enabled: true,
             mist_spot_markers_enabled: true,
             dig_spot_markers_enabled: true,
+            autosave_enabled: true,
+            autosave_interval_minutes: 5,
+            autosave_elapsed_ms: 0,
+            autosave_last_ms: undefined,
+            autosave_was_active: false,
+            autosave_quiet_ms: 0,
+            autosave_retry_ms: 0,
+            quicksave_requested: false,
             museum_label: undefined,
             all_bug_markers_enabled: true,
             legendary_day: "",
@@ -82,6 +90,12 @@ function MistriaCompanion_reset_save(_ctx) {
     if (_label != undefined && !_label.freed) ANCHOR.free_node(_label);
     _runtime.museum_label = undefined;
     _runtime.clock_paused = false;
+    _runtime.autosave_elapsed_ms = 0;
+    _runtime.autosave_last_ms = undefined;
+    _runtime.autosave_was_active = false;
+    _runtime.autosave_quiet_ms = 0;
+    _runtime.autosave_retry_ms = 0;
+    _runtime.quicksave_requested = false;
     _runtime.seed_repeat = undefined;
     _runtime.seed_hint = undefined;
     _runtime.recipe_cache = {};
@@ -126,7 +140,8 @@ function __MistriaCompanion_hotkey_actions() {
         { key: "wiki_hints", title: "Show / hide wiki hints", default_key: "F8", callback: MistriaCompanion_toggle_wiki_hints },
         { key: "bugs", title: "Show / hide ordinary bugs", default_key: "F9", callback: MistriaCompanion_toggle_all_bug_markers },
         { key: "notifications", title: "Toggle automatic alerts", default_key: "F10", callback: MistriaCompanion_toggle_notifications },
-        { key: "farm_status", title: "Farm status", default_key: "F4", callback: MistriaCompanion_show_farm_status }
+        { key: "farm_status", title: "Farm status", default_key: "F4", callback: MistriaCompanion_show_farm_status },
+        { key: "save", title: "Save to companion slot", default_key: "F11", callback: MistriaCompanion_quicksave }
     ];
 }
 
@@ -146,6 +161,7 @@ function __MistriaCompanion_register_hotkeys() {
     _runtime.notifications_enabled = __MistriaCompanion_any_alerts_enabled();
     _runtime.all_bug_markers_enabled = __MistriaCompanion_preference(_config, "all_bug_markers_enabled", true);
     _runtime.wiki_hints_enabled = __MistriaCompanion_preference(_config, "wiki_hints_enabled", true);
+    _runtime.autosave_interval_minutes = __MistriaCompanion_autosave_interval_setting(_config);
     var _actions = __MistriaCompanion_hotkey_actions();
     _runtime.bindings = {};
     _runtime.keybind_rows = [];
@@ -154,7 +170,8 @@ function __MistriaCompanion_register_hotkeys() {
         mounted_interactions_enabled: _runtime.mounted_interactions_enabled,
         notifications_enabled: _runtime.notifications_enabled == true,
         all_bug_markers_enabled: _runtime.all_bug_markers_enabled == true,
-        wiki_hints_enabled: _runtime.wiki_hints_enabled == true
+        wiki_hints_enabled: _runtime.wiki_hints_enabled == true,
+        autosave_interval_minutes: _runtime.autosave_interval_minutes
     };
     for (var _index = 0; _index < array_length(_options); _index++) {
         var _key = _options[_index].key;
@@ -224,7 +241,8 @@ function __MistriaCompanion_configuration_options() {
         { key: "mist_spot_markers_enabled", title: "Show mist spots on the map", alert: false },
         { key: "dig_spot_alerts_enabled", title: "Show dig spot alerts", alert: true },
         { key: "dig_spot_markers_enabled", title: "Show dig spots on the map", alert: false },
-        { key: "legendary_fish_alerts_enabled", title: "Show legendary fish alerts", alert: true }
+        { key: "legendary_fish_alerts_enabled", title: "Show legendary fish alerts", alert: true },
+        { key: "autosave_enabled", title: "Autosave", alert: false }
     ];
 }
 
@@ -286,6 +304,7 @@ function __MistriaCompanion_save_preferences() {
         var _key = _keys[_index];
         _config[$ _key] = _runtime[$ _key] == true;
     }
+    _config.autosave_interval_minutes = _runtime.autosave_interval_minutes;
     mmapi_config_write("mistria_item_details", 1, _config);
     // MMAPI logs write failures but does not return a status.
     var _saved = mmapi_config_read_valid("mistria_item_details", 1);
@@ -298,7 +317,181 @@ function __MistriaCompanion_save_preferences() {
             return false;
         }
     }
+    if (__MistriaCompanion_field(_saved, "autosave_interval_minutes") == undefined
+        || typeof(_saved.autosave_interval_minutes) == "bool"
+        || !__MistriaCompanion_autosave_interval_valid(_saved.autosave_interval_minutes)
+        || _saved.autosave_interval_minutes != _runtime.autosave_interval_minutes)
+    {
+        mmapi_log_warn("mistria_item_details", "Autosave interval could not be saved; changes apply only to this session.");
+        return false;
+    }
     return true;
+}
+
+function __MistriaCompanion_autosave_interval_valid(_value) {
+    return typeof(_value) != "bool" && (is_real(_value) || is_int64(_value))
+        && _value >= 1 && _value <= 30 && floor(_value) == _value;
+}
+
+function __MistriaCompanion_autosave_interval_setting(_config) {
+    if (__MistriaCompanion_field(_config, "autosave_interval_minutes") == undefined) return 5;
+    if (typeof(_config.autosave_interval_minutes) != "bool"
+        && __MistriaCompanion_autosave_interval_valid(_config.autosave_interval_minutes))
+    {
+        return real(_config.autosave_interval_minutes);
+    }
+    if (typeof(_config.autosave_interval_minutes) != "bool"
+        && (is_real(_config.autosave_interval_minutes) || is_int64(_config.autosave_interval_minutes))
+        && _config.autosave_interval_minutes > 30 && _config.autosave_interval_minutes <= I32_MAX
+        && floor(_config.autosave_interval_minutes) == _config.autosave_interval_minutes)
+    {
+        mmapi_log_warn("mistria_item_details", "Autosave interval exceeds the slider range; using 30 minutes.");
+        return 30;
+    }
+    mmapi_log_warn("mistria_item_details", "Invalid autosave_interval_minutes; using 5.");
+    return 5;
+}
+
+function __MistriaCompanion_reset_autosave_timer() {
+    var _runtime = __MistriaCompanion_runtime();
+    _runtime.autosave_elapsed_ms = 0;
+    _runtime.autosave_last_ms = undefined;
+    _runtime.autosave_was_active = false;
+    _runtime.autosave_quiet_ms = 0;
+    _runtime.autosave_retry_ms = 0;
+}
+
+function __MistriaCompanion_autosave_active() {
+    return __MistriaCompanion_ready() && window_has_focus() && !game_paused()
+        && !__MistriaCompanion_dig_notice_blocked()
+        && !__MistriaCompanion_sightings_transition_active()
+        && LOAD_SEQUENCE != undefined && !LOAD_SEQUENCE.is_active()
+        && !ARI.end_of_day_sequence;
+}
+
+function __MistriaCompanion_autosave_safe() {
+    var _state = obj_ari.fsm.current_state_id();
+    return (_state == PlayerState.Default || _state == PlayerState.MountDefault)
+        && obj_ari.fsm.next_state == undefined && ARI.fire_breath_time <= 0;
+}
+
+function __MistriaCompanion_autosave_stamp(_path) {
+    var _vault = vault_open_vault(_path);
+    var _info;
+    try {
+        // The native loader warns about this result, but still reads the save.
+        if (vault_validate(_vault) == false) {
+            mmapi_warn_rate_limited("mistria_item_details:save_checksum", "mistria_item_details",
+                "Companion save checksum/tamper warning at " + _path
+                + "; checking readable save records as the native loader does.");
+        }
+        var _records = ["info", "header", "gamedata", "player", "npcs", "quests", "game_stats", "date_photos"];
+        for (var _index = 0; _index < array_length(_records); _index++) {
+            var _name = _records[_index];
+            var _text = vault_load_file(_vault, _name);
+            if (!is_string(_text)) throw "Companion save is missing its " + _name + " record.";
+            var _record = json_parse(_text);
+            if (!is_struct(_record)) throw "Companion save has an invalid " + _name + " record.";
+            if (_name == "info") _info = _record;
+        }
+    } catch (_error) {
+        vault_close_vault(_vault);
+        throw _error;
+    }
+    vault_close_vault(_vault);
+    var _stamp = __MistriaCompanion_field(_info, "last_played");
+    if (_stamp == undefined || typeof(_info.last_played) == "bool" || (!is_real(_stamp) && !is_int64(_stamp))) {
+        throw "Companion save has no valid saved timestamp.";
+    }
+    return _stamp;
+}
+
+function __MistriaCompanion_write_companion_save(_automatic=true) {
+    var _runtime = __MistriaCompanion_runtime();
+    // Journal saves use IDs from 0 through I32_MAX; reserve the next ID per character.
+    var _path = exact_save_path(Game.unique_identifier, true, 2147483648);
+    var _old_position = ARI.save_position;
+    var _old_path = Game.last_serde_path;
+    var _home = DUNGEON_RUNNER != undefined
+        || (CURRENT_DYN_INDEX == undefined && LOCATIONS[CURRENT_LOCATION_ID].serializable == false);
+    var _failure = undefined;
+    try {
+        var _previous = file_exists(_path) ? __MistriaCompanion_autosave_stamp(_path) : undefined;
+        var _started = date_current_datetime();
+        ARI.save_position = _home ? player_wake_position()
+            : new LocationPosition(CURRENT_LOCATION_ID, Vec2(obj_ari.x, obj_ari.y), CURRENT_DYN_INDEX);
+        save_game(_path);
+        // save_game has no return status, including when another mod vetoes a save.
+        if (!file_exists(_path)) throw "No autosave file was created.";
+        var _saved = __MistriaCompanion_autosave_stamp(_path);
+        if (_saved < _started || (_previous != undefined && _saved <= _previous)) {
+            throw "No new autosave could be confirmed; the save may have failed or been blocked.";
+        }
+    } catch (_error) {
+        _failure = string(_error);
+    }
+    ARI.save_position = _old_position;
+    _runtime.autosave_last_ms = current_time();
+    _runtime.autosave_was_active = true;
+    _runtime.autosave_quiet_ms = 0;
+    _runtime.quicksave_requested = false;
+    if (_failure != undefined) {
+        Game.last_serde_path = _old_path;
+        _runtime.autosave_retry_ms = 60000;
+        mmapi_log_warn("mistria_item_details", (_automatic ? "Autosave" : "Quick save")
+            + " failed at " + _path + ": " + _failure);
+        __MistriaCompanion_notify(_automatic
+            ? "Autosave failed. Retrying in 1 active-play minute; check the mod log."
+            : "Quick save failed. Check the mod log; press the save key again to retry.", 60 * 5);
+        return;
+    }
+    _runtime.autosave_elapsed_ms = 0;
+    _runtime.autosave_retry_ms = 0;
+    var _message = _automatic ? "Companion autosaved." : "Companion saved.";
+    if (_home) _message += " Reloading this save returns you home.";
+    __MistriaCompanion_notify(_message, 60 * 3);
+}
+
+function MistriaCompanion_quicksave() {
+    if (!__MistriaCompanion_autosave_active()) {
+        __MistriaCompanion_notify("Close menus and finish dialogue or traveling before using quick save.", 60 * 3);
+        return;
+    }
+    var _runtime = __MistriaCompanion_runtime();
+    if (_runtime.quicksave_requested) return;
+    _runtime.quicksave_requested = true;
+    _runtime.autosave_quiet_ms = 0;
+    _runtime.autosave_last_ms = current_time();
+    _runtime.autosave_was_active = true;
+    __MistriaCompanion_notify("Quick save requested; waiting for a safe moment.", 60 * 3);
+}
+
+function MistriaCompanion_update_autosave() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _now = current_time();
+    var _active = (_runtime.autosave_enabled || _runtime.quicksave_requested)
+        && __MistriaCompanion_autosave_active();
+    var _elapsed = _runtime.autosave_last_ms == undefined ? 0 : _now - _runtime.autosave_last_ms;
+    _runtime.autosave_last_ms = _now;
+    // Do not count pauses, focus changes, or long stalls/suspend gaps as active play.
+    if (!_active || !_runtime.autosave_was_active || _elapsed < 0 || _elapsed > 1000) {
+        _runtime.autosave_was_active = _active;
+        _runtime.autosave_quiet_ms = 0;
+        return;
+    }
+    if (_runtime.autosave_enabled) _runtime.autosave_elapsed_ms += _elapsed;
+    _runtime.autosave_retry_ms = max(0, _runtime.autosave_retry_ms - _elapsed);
+    if (!__MistriaCompanion_autosave_safe()) {
+        _runtime.autosave_quiet_ms = 0;
+        return;
+    }
+    _runtime.autosave_quiet_ms += _elapsed;
+    if (_runtime.autosave_quiet_ms >= 1000
+        && (_runtime.quicksave_requested || (_runtime.autosave_enabled && _runtime.autosave_retry_ms == 0
+            && _runtime.autosave_elapsed_ms >= _runtime.autosave_interval_minutes * 60000)))
+    {
+        __MistriaCompanion_write_companion_save(!_runtime.quicksave_requested);
+    }
 }
 
 function __MistriaCompanion_mounted_ready() {
@@ -749,7 +942,10 @@ function MistriaCompanion_toggle_configuration(_popup, _key) {
         if (_option.key != _key) continue;
         var _runtime = __MistriaCompanion_runtime();
         _runtime[$ _key] = !_runtime[$ _key];
-        if (_option.alert) {
+        if (_key == "autosave_enabled") {
+            __MistriaCompanion_reset_autosave_timer();
+            MistriaCompanion_autosave_interval_think(_popup);
+        } else if (_option.alert) {
             __MistriaCompanion_apply_alert_preferences(!_runtime[$ _key]
                 && (_key == "bug_alerts_enabled" || _key == "legendary_fish_alerts_enabled"));
         } else {
@@ -762,6 +958,96 @@ function MistriaCompanion_toggle_configuration(_popup, _key) {
         return;
     }
     mmapi_log_warn("mistria_item_details", "Unknown configuration option: " + string(_key));
+}
+
+function MistriaCompanion_autosave_interval_think(_popup) {
+    var _row = __MistriaCompanion_field(_popup, "mistria_autosave_interval");
+    if (_row == undefined || _row.element.freed) return;
+    var _runtime = __MistriaCompanion_runtime();
+    var _enabled = _runtime.autosave_enabled;
+    if (_row.visible != _enabled) {
+        if (_enabled) _row.element.enable(); else _row.element.disable();
+        _row.visible = _enabled;
+    }
+    var _active = _enabled && !_popup.close_requested && !_popup.free_requested
+        && _popup.hide_requests <= 0 && _popup.canvas.is_unlocked();
+    _row.button.set_unlocked(_active);
+    _row.range.set_unlocked(_active);
+    if (!_active) _row.preview_minutes = undefined;
+    var _height = 1;
+    if (_enabled) {
+        var _minutes = _row.preview_minutes == undefined ? _runtime.autosave_interval_minutes : _row.preview_minutes;
+        var _text = "Save every " + string(_minutes) + (_minutes == 1 ? " minute" : " minutes");
+        if (_row.label.get_text() != _text) _row.label.set_text(_text);
+        _row.label.measure();
+        _height = max(44, _row.label.get_height() + 34);
+        _row.plate.set_height(_height - 4);
+        var _slider_y = _row.label.get_height() + 16;
+        _row.range.set_y(_slider_y);
+        _row.minimum.set_y(_slider_y - 4);
+        _row.maximum.set_y(_slider_y - 4);
+        _row.button.set_x((_minutes - 1) / 29 * (_row.range.get_width() - _row.button.get_width()));
+    }
+    if (_height != _row.height) {
+        _row.scroller.add_height_to_element(_row.element, _height - _row.height);
+        _row.height = _height;
+    }
+}
+
+function MistriaCompanion_set_autosave_interval(_minutes, _popup) {
+    if (_popup.close_requested || _popup.free_requested || _popup.hide_requests > 0
+        || !_popup.canvas.is_unlocked() || !__MistriaCompanion_runtime().autosave_enabled) return;
+    if (!__MistriaCompanion_autosave_interval_valid(_minutes)) {
+        mmapi_log_warn("mistria_item_details", "Invalid autosave interval: " + string(_minutes));
+        _popup.mistria_configuration_status.set_text("Choose whole minutes from 1 to 30.");
+        return;
+    }
+    var _runtime = __MistriaCompanion_runtime();
+    if (_runtime.autosave_interval_minutes == _minutes) return;
+    _runtime.autosave_interval_minutes = _minutes;
+    __MistriaCompanion_reset_autosave_timer();
+    MistriaCompanion_autosave_interval_think(_popup);
+    var _saved = __MistriaCompanion_save_preferences();
+    _popup.mistria_configuration_status.set_text(
+        _saved ? "Changes saved automatically." : "Not saved. Changes apply only this session.");
+}
+
+function __MistriaCompanion_autosave_slider_minutes(_row, _position) {
+    var _travel = _row.range.get_width() - _row.button.get_width();
+    return 1 + round(clamp(_position / _travel, 0, 1) * 29);
+}
+
+function MistriaCompanion_autosave_slider_think(_popup) {
+    var _row = _popup.mistria_autosave_interval;
+    if (_popup.close_requested || _popup.free_requested || _popup.hide_requests > 0
+        || !_popup.canvas.is_unlocked() || !_row.button.is_unlocked()
+        || !__MistriaCompanion_runtime().autosave_enabled) return;
+    if (ANCHOR.in_directional_control() && _row.button.is_hovered()) {
+        var _direction = ANCHOR.press_and_hold_reader.pressed[InputId.Right]
+            - ANCHOR.press_and_hold_reader.pressed[InputId.Left];
+        if (_direction != 0) {
+            _row.preview_minutes = undefined;
+            MistriaCompanion_set_autosave_interval(
+                clamp(__MistriaCompanion_runtime().autosave_interval_minutes + _direction, 1, 30), _popup);
+        }
+    } else if (_row.button.in_drag()) {
+        _row.preview_minutes = __MistriaCompanion_autosave_slider_minutes(
+            _row, _row.button.get_position_with_drag_applied().x);
+        MistriaCompanion_autosave_interval_think(_popup);
+    } else if (_row.preview_minutes != undefined) {
+        var _minutes = _row.preview_minutes;
+        _row.preview_minutes = undefined;
+        MistriaCompanion_set_autosave_interval(_minutes, _popup);
+    }
+}
+
+function MistriaCompanion_autosave_slider_tap(_popup) {
+    var _row = _popup.mistria_autosave_interval;
+    if (_row.element.freed || !_row.range.is_unlocked()) return;
+    var _minutes = __MistriaCompanion_autosave_slider_minutes(
+        _row, MOUSE_GUI_X - _row.range.cache_x - _row.button.get_width() / 2);
+    _row.preview_minutes = undefined;
+    MistriaCompanion_set_autosave_interval(_minutes, _popup);
 }
 
 function MistriaCompanion_show_configuration(_menu) {
@@ -815,6 +1101,36 @@ function MistriaCompanion_show_configuration(_menu) {
         _value.set_think_callback(MistriaCompanion_configuration_row_think, [_value, _option.key]);
         MistriaCompanion_configuration_row_think(_value, _option.key);
     }
+    var _element = _scroller.new_element(44);
+    var _plate = ANCHOR.nine_slice(_element)
+        .set_sprites_from_key("spr_ui_button").set_xy(3, 2)
+        .set_size(_element.get_width() - 6, 40);
+    var _label = ANCHOR.text(_plate).set_xy(5, 5)
+        .set_max_width(_plate.get_width() - 10).allow_line_breaks()
+        .set_lut(COMMON_LUT, CommonLutIndex.Dark);
+    var _range = ANCHOR.nine_slice(_plate).set_xy(20, 26)
+        .set_size(_plate.get_width() - 44, 4)
+        .set_sprite(spr_ui_journal_settings_slider_range).set_hover_sound(undefined)
+        .set_tap_callback(MistriaCompanion_autosave_slider_tap, [_popup]);
+    var _button = ANCHOR.nine_slice(_range)
+        .set_sprites_from_key("spr_ui_button").set_size(16, 9)
+        .set_align(Align.LeftIn, Align.Middle).set_hover_sound(undefined)
+        .add_to_pilot(_pilot, true).mouse_can_escape_tap(false)
+        .add_hover_outline().listen_for_hovers().listen_for_taps()
+        .set_think_callback(MistriaCompanion_autosave_slider_think, [_popup]);
+    var _minimum = ANCHOR.text(_plate).set_xy(8, 22)
+        .set_lut(COMMON_LUT, CommonLutIndex.Dark).set_text("1");
+    var _maximum = ANCHOR.text(_plate).set_xy(_plate.get_width() - 17, 22)
+        .set_lut(COMMON_LUT, CommonLutIndex.Dark).set_text("30");
+    _minimum.measure();
+    _maximum.measure();
+    _popup.mistria_autosave_interval = {
+        element: _element, plate: _plate, button: _button, label: _label, range: _range,
+        minimum: _minimum, maximum: _maximum, scroller: _scroller, height: 44,
+        visible: true, preview_minutes: undefined
+    };
+    _root.set_think_callback(MistriaCompanion_autosave_interval_think, [_popup]);
+    MistriaCompanion_autosave_interval_think(_popup);
     _status.set_y(_root.get_height() + 8);
     _popup.body.set_height(_root.get_height() + _status_height + 8);
     _popup.refresh_backplate_height();
@@ -3687,13 +4003,13 @@ function __MistriaCompanion_cooking_description_set(_text) {
     if (!is_string(_text) || self.menu.context != RecipeContext.Cooking || self.menu.description != self.body
         || self.menu.close_requested || self.menu.free_requested)
     {
-        return self.original_set_text(_text);
+        return self.bound_set_text(_text);
     }
     self.source_text = _text;
     var _details = self.menu.item == undefined ? undefined : __MistriaCompanion_for_item(self.menu.item);
     self.base_text = _details == undefined ? _text : __MistriaCompanion_cooking_base_text(_text, _details, false);
     self.item = self.menu.item;
-    return self.original_set_text(self.base_text);
+    return self.bound_set_text(self.base_text);
 }
 
 function __MistriaCompanion_update_cooking_details(_menu, _details) {
@@ -3710,6 +4026,8 @@ function __MistriaCompanion_update_cooking_details(_menu, _details) {
             source_text: undefined, base_text: undefined, item: undefined,
             menu: _menu, body: _body, original_set_text: _body.set_text
         };
+        // Anchor's static setter needs the text node as self, not our wrapper state.
+        _state.bound_set_text = method(_body, _state.original_set_text);
         _state.wrapper = method(_state, __MistriaCompanion_cooking_description_set);
         _body.set_text = _state.wrapper;
         _state.button = ANCHOR.nine_slice(_body.parent)
@@ -3822,6 +4140,7 @@ function MistriaCompanion_tick() {
     _runtime.frame++;
     __MistriaCompanion_register_hotkeys();
     MistriaCompanion_update_settings_keybinds();
+    MistriaCompanion_update_autosave();
     if (!__MistriaCompanion_ready()) {
         _runtime.seed_repeat = undefined;
         _runtime.seed_hint = undefined;
@@ -3899,5 +4218,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.51");
+mmapi_mod_declare("mistria_item_details", "1.0.52");
 MistriaCompanion_register();
