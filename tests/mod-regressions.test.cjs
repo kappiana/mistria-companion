@@ -806,7 +806,7 @@ function giftTooltipHarness() {
   const context = load([
     'npc_is_known', 'npc_needs_gift', 'gift_npcs', 'gift_desire_for_npc', 'join', 'for_item', 'details_text',
     'compact_gift_text', 'gift_highlight_runs', 'clear_gift_highlights', 'update_gift_highlights',
-    'has_listed_gift', 'universal_gift_text', 'cooking_base_text', 'cooking_gift_text',
+    'has_listed_gift', 'universal_gift_text', 'cooking_base_text', 'cooking_gift_text', 'cooking_description_set',
     'clear_cooking_details', 'update_cooking_details', 'text_popup',
   ].map(privateName).concat([
     publicName('description'), publicName('reset_save'), publicName('update_gift_tooltips'),
@@ -1199,9 +1199,240 @@ test('clock release preserves the incoming engine/filter result and save reset c
   assert.equal(runtime.legendary_sightings.length, 0);
 });
 
+function farmStatusHarness() {
+  const warnings = [];
+  const cropChecks = [];
+  const Category = { Crop: 1, Tree: 2, Building: 3, Other: 4 };
+  function grid(width = 8, height = 6) {
+    return {
+      dims: { x: width, y: height }, node_len: width * height, is_setup: false,
+      node_parent: Array(width * height).fill(undefined),
+      node_object_id: Array(width * height).fill(undefined),
+      node_terrain_ground_kind: Array(width * height).fill(0),
+      node_terrain_is_watered: Array(width * height).fill(false),
+      node_index_for_cell(x, y) {
+        assert.ok(x >= 0 && x < width && y >= 0 && y < height);
+        return y * width + x;
+      },
+    };
+  }
+  function soil(g, x, y, watered = false) {
+    for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+      const i = g.node_index_for_cell(x + dx, y + dy);
+      g.node_terrain_ground_kind[i] = 1;
+      g.node_terrain_is_watered[i] = watered;
+    }
+  }
+  function object(g, x, y, category = Category.Crop, extra = {}, width = 2, height = 2) {
+    const node = {
+      top_left_x: x, top_left_y: y,
+      prototype: { category_id: category, count: 99 }, stage: 1, matureStage: 2, ...extra,
+    };
+    for (let dy = 0; dy < height; dy++) for (let dx = 0; dx < width; dx++) {
+      const i = g.node_index_for_cell(x + dx, y + dy);
+      g.node_parent[i] = node;
+      g.node_object_id[i] = category;
+    }
+    return node;
+  }
+  const farm = grid();
+  const dynamic = [];
+  const context = load([
+    'farm_status_unavailable', 'farm_status_counts', 'scan_farm_grid',
+    'farm_status_add', 'farm_status_snapshot',
+  ].map(privateName), {
+    GRIDS: [farm], LocationId: { Farm: 0 }, GroundKind: { Soil: 1 },
+    ObjectCategory: Category, PlayerBuildingKind: { Greenhouse: 7 },
+    DYNAMIC_GRIDS: { count: () => dynamic.length, get: i => dynamic[i] },
+    can_interact: node => {
+      cropChecks.push(node);
+      if (node.no_harvest || (node.managed && node.managed_timer !== undefined)) return false;
+      return node.stage === (node.regrow_cycle ? node.regrowStage : node.matureStage);
+    },
+    mmapi_warn_rate_limited: (...args) => warnings.push(args),
+  });
+  function greenhouse(x, y, index) {
+    return object(farm, x, y, Category.Building, {
+      prototype: { category_id: Category.Building, player_building_kind: 7 }, dyn_index: index,
+    });
+  }
+  return {
+    context, farm, dynamic, grid, soil, object, greenhouse, Category, warnings, cropChecks,
+    snapshot: context.__MistriaCompanion_farm_status_snapshot,
+  };
+}
+
+test('farm status counts crop plots and unwatered plants across Farm and an unvisited greenhouse', () => {
+  const h = farmStatusHarness();
+  const f = h.farm;
+  h.soil(f, 0, 0);
+  h.soil(f, 2, 0, true);
+  h.object(f, 2, 0, h.Category.Crop, { stage: 2 });
+  h.soil(f, 4, 0);
+  h.object(f, 4, 0);
+  h.soil(f, 6, 0);
+  h.object(f, 6, 0, h.Category.Other); // Wilted plant or another obstruction.
+  h.soil(f, 0, 2);
+  h.object(f, 0, 2, h.Category.Tree);
+  h.object(f, 2, 2); // Wild forage on untilled ground is not a planted plot.
+  h.soil(f, 4, 2);
+  f.node_terrain_ground_kind[f.node_index_for_cell(6, 2)] = 1;
+  h.greenhouse(0, 4, 0);
+  const g = h.grid(4, 4);
+  h.dynamic.push(g);
+  h.soil(g, 0, 0);
+  h.object(g, 0, 0, h.Category.Crop, { stage: 2 });
+  h.soil(g, 2, 0, true);
+  h.object(g, 2, 0, h.Category.Crop, { regrow_cycle: true, stage: 2, regrowStage: 3 });
+  h.soil(g, 0, 2);
+  h.soil(g, 2, 2);
+  h.object(g, 2, 2, h.Category.Crop, { no_harvest: true, stage: 2 });
+  h.context.GRID = h.grid(); // The player is somewhere else entirely.
+  const before = JSON.stringify([f, g]);
+  const report = h.snapshot();
+  assert.deepEqual({ ...report.farm }, { empty: 2, ready: 1, growing: 1, unwatered: 1 });
+  assert.deepEqual({ ...report.greenhouse }, { empty: 1, ready: 1, growing: 2, unwatered: 2 });
+  assert.deepEqual({ ...report.total }, { empty: 3, ready: 2, growing: 3, unwatered: 3 });
+  assert.equal(report.greenhouse_count, 1);
+  assert.equal(h.cropChecks.length, 5, 'count parents once, not their four occupied cells or item yield');
+  assert.equal(JSON.stringify([f, g]), before, 'scanning must not alter stages, flags, watering, or grid data');
+  assert.equal(h.warnings.length, 0);
+});
+
+test('farm status follows only greenhouse buildings and deduplicates interior references', () => {
+  const h = farmStatusHarness();
+  h.greenhouse(0, 0, 0);
+  h.greenhouse(2, 0, 0);
+  h.greenhouse(4, 0, 1);
+  for (let i = 0; i < 3; i++) {
+    const g = h.grid(2, 2);
+    h.soil(g, 0, 0);
+    h.object(g, 0, 0, h.Category.Crop, { stage: 2 });
+    h.dynamic.push(g);
+  }
+  h.context.GRIDS.push(h.dynamic[2]); // An unrelated map also has crops.
+  const report = h.snapshot();
+  assert.equal(report.greenhouse_count, 2);
+  assert.equal(report.greenhouse.ready, 2, 'unlinked dynamic interiors and other regions are excluded');
+  assert.equal(h.cropChecks.length, 2);
+});
+
+test('native regrowth and managed-crop readiness are respected without counting multicell crops twice', () => {
+  const h = farmStatusHarness();
+  h.soil(h.farm, 0, 0);
+  h.soil(h.farm, 2, 0);
+  const crop = h.object(h.farm, 0, 0, h.Category.Crop,
+    { regrow_cycle: true, regrowStage: 1, stage: 1 }, 4, 2);
+  assert.equal(h.snapshot().farm.ready, 1);
+  crop.managed = true;
+  crop.managed_timer = 0;
+  const report = h.snapshot();
+  assert.equal(report.farm.ready, 0);
+  assert.equal(report.farm.growing, 1);
+  assert.equal(report.farm.empty, 0);
+  assert.equal(report.farm.unwatered, 1);
+});
+
+test('an unbuilt greenhouse has honest zero counts, while missing built interiors fail visibly', () => {
+  const h = farmStatusHarness();
+  h.context.DYNAMIC_GRIDS = undefined;
+  const empty = h.snapshot();
+  assert.equal(empty.greenhouse_count, 0);
+  assert.deepEqual({ ...empty.greenhouse }, { empty: 0, ready: 0, growing: 0, unwatered: 0 });
+  h.greenhouse(0, 0, 0);
+  assert.equal(h.snapshot(), undefined);
+  assert.equal(h.warnings.length, 1);
+});
+
+test('farm status rejects incomplete grid data rather than inventing all-zero totals', () => {
+  for (const change of [
+    h => { h.context.GRIDS = undefined; },
+    h => { h.context.GRIDS[0] = undefined; },
+    h => { h.farm.node_parent.length = 1; },
+    h => { h.farm.node_object_id[0] = 1; },
+    h => { h.object(h.farm, 0, 0).top_left_x = -1; },
+    h => { h.greenhouse(0, 0, undefined); },
+    h => { h.greenhouse(0, 0, 0); h.dynamic.push(undefined); },
+    h => { h.greenhouse(0, 0, 0); h.context.DYNAMIC_GRIDS = {}; },
+    h => { h.soil(h.farm, 0, 0); h.object(h.farm, 0, 0); h.farm.node_terrain_is_watered[0] = undefined; },
+  ]) {
+    const h = farmStatusHarness();
+    change(h);
+    assert.equal(h.snapshot(), undefined);
+    assert.ok(h.warnings.length > 0);
+  }
+});
+
+test('F4 opens one native farm-status menu with combined and per-area counts, independent of alerts', () => {
+  const runtime = { notifications_enabled: false };
+  const menus = [];
+  const notices = [];
+  let reads = 0;
+  let ready = true;
+  let paused = false;
+  let data = {
+    total: { empty: 5, ready: 4, growing: 8, unwatered: 3 },
+    farm: { empty: 1, ready: 2, growing: 5, unwatered: 2 },
+    greenhouse: { empty: 4, ready: 2, growing: 3, unwatered: 1 },
+    greenhouse_count: 1,
+  };
+  const context = load([privateName('farm_status_section'), publicName('show_farm_status')], {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_ready: () => ready,
+    game_paused: () => paused,
+    __MistriaCompanion_dig_notice_blocked: () => false,
+    __MistriaCompanion_sightings_transition_active: () => false,
+    __MistriaCompanion_farm_status_snapshot: () => { reads++; return data; },
+    __MistriaCompanion_notify: text => notices.push(text),
+    __MistriaCompanion_text_popup: (title, text) => {
+      const popup = { title, text, spawn() { this.spawned = true; } };
+      menus.push(popup);
+      return popup;
+    },
+  });
+  const show = context.MistriaCompanion_show_farm_status;
+  show();
+  assert.equal(menus.length, 1);
+  assert.equal(menus[0].title, 'Farm status');
+  assert.equal(menus[0].spawned, true);
+  assert.match(menus[0].text, /^Combined totals\nEmpty tilled spots: 5\nReady to harvest: 4\nPlanted, not ready: 8\nUnwatered crops: 3/);
+  assert.match(menus[0].text, /\n\nFarm\nEmpty tilled spots: 1/);
+  assert.match(menus[0].text, /\n\nGreenhouse\nEmpty tilled spots: 4/);
+  assert.doesNotMatch(menus[0].text, /Hay|Forage|Machines|Cave/);
+  paused = true;
+  show();
+  assert.equal(reads, 1, 'repeated hotkeys do not duplicate an open menu');
+  menus[0].close_requested = true;
+  show();
+  assert.equal(menus.length, 1);
+  assert.match(notices.at(-1), /Close menus/);
+  paused = false;
+  data = undefined;
+  show();
+  assert.match(notices.at(-1), /not ready/);
+  assert.equal(menus.length, 1, 'missing data must not open a success-shaped all-zero report');
+  ready = false;
+  show();
+  assert.match(notices.at(-1), /during gameplay/);
+});
+
+test('the farm-status binding preserves old remaps and supports a configurable alternate', () => {
+  const h = mountedConfigHarness({ clock: 'F4', farm_status: 'F3', farm_status_alternate: 'SHIFT+F3' });
+  h.register();
+  assert.equal(h.runtime.bindings.clock, 'F4');
+  assert.equal(h.runtime.bindings.farm_status, 'F3');
+  assert.deepEqual(h.registrations.filter(row => row.callback === h.context.MistriaCompanion_show_farm_status)
+    .map(row => row.binding.name), ['F3', 'SHIFT+F3']);
+  const collision = mountedConfigHarness({ clock: 'F4' });
+  collision.register();
+  assert.equal(collision.runtime.bindings.clock, 'F4', 'a new default must not steal an existing remap');
+  assert.equal(collision.runtime.bindings.farm_status, undefined);
+  assert.ok(collision.warnings.some(([, message]) => message.includes('Duplicate binding F4')));
+});
+
 const hotkeyCallbacks = [
   'toggle_clock', 'show_local_sightings', 'open_wiki',
-  'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications',
+  'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications', 'show_farm_status',
 ];
 
 function mountedConfigHarness(config) {
@@ -1241,14 +1472,14 @@ test('mounted config defaults enabled and persists explicit boolean values witho
     assert.equal(writes[0][2].mounted_interactions_enabled, expected);
     assert.deepEqual(reads, [['mistria_item_details', 1]]);
     assert.deepEqual(writes[0].slice(0, 2), ['mistria_item_details', 1]);
-    assert.deepEqual(registrations.map(row => row.binding.name), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10']);
+    assert.deepEqual(registrations.map(row => row.binding.name), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4']);
     assert.equal(warnings.length, 0);
     context.MistriaCompanion_reset_save({});
     register();
     assert.equal(runtime.mounted_interactions_enabled, expected, 'save reset preserves the configured preference');
     assert.equal(reads.length, 1);
     assert.equal(writes.length, 1);
-    assert.equal(registrations.length, 6);
+    assert.equal(registrations.length, 7);
   }
 });
 
@@ -1288,6 +1519,7 @@ test('mounted config preserves custom primary and alternate keybindings while wr
     wiki_hints: 'F12', wiki_hints_alternate: '',
     bugs: 'INSERT', bugs_alternate: 'SHIFT+INSERT',
     notifications: 'DELETE', notifications_alternate: '',
+    farm_status: 'F3', farm_status_alternate: 'SHIFT+F3',
   };
   const before = { ...config };
   const { context, runtime, register, reads, writes, registrations, warnings } = mountedConfigHarness(config);
@@ -1342,7 +1574,8 @@ test('fresh and legacy configs default automatic alerts off, all bugs on, and wi
     assert.equal(store.value.wiki_hints_enabled, true);
     assert.equal(h.feedback.length, 0, 'startup must not announce default settings');
     assert.equal(h.runtime.bindings.notifications, 'F10');
-    assert.equal(h.runtime.keybind_rows.at(-1).title, 'Toggle automatic alerts');
+    assert.equal(h.runtime.keybind_rows[5].title, 'Toggle automatic alerts');
+    assert.equal(h.runtime.keybind_rows.at(-1).title, 'Farm status');
     if (value) {
       assert.equal(h.runtime.mounted_interactions_enabled, false);
       assert.equal(store.value.wiki, 'F11');
@@ -1406,17 +1639,18 @@ test('F10 migrates old dig-notification bindings without overriding explicit new
   } };
   const h = preferenceSessionHarness(store);
   assert.equal(h.runtime.bindings.notifications, 'DELETE');
-  assert.deepEqual(Array.from(h.runtime.keybind_rows.at(-1).bindings), ['DELETE', 'SHIFT+DELETE']);
+  assert.deepEqual(Array.from(h.runtime.keybind_rows[5].bindings), ['DELETE', 'SHIFT+DELETE']);
   assert.equal(store.value.notifications, 'DELETE');
   assert.equal(store.value.notifications_alternate, 'SHIFT+DELETE');
   assert.equal(store.value.dig_notifications, undefined);
-  assert.equal(h.registrations.at(-1).callback, h.context.MistriaCompanion_toggle_notifications);
+  assert.equal(h.registrations.find(row => row.binding.name === 'SHIFT+DELETE').callback,
+    h.context.MistriaCompanion_toggle_notifications);
   const explicit = preferenceSessionHarness({ value: { __config_version: 1,
     notifications: 'HOME', notifications_alternate: '',
     dig_notifications: 'DELETE', dig_notifications_alternate: 'SHIFT+DELETE',
   } });
   assert.equal(explicit.runtime.bindings.notifications, 'HOME');
-  assert.deepEqual(Array.from(explicit.runtime.keybind_rows.at(-1).bindings), ['HOME']);
+  assert.deepEqual(Array.from(explicit.runtime.keybind_rows[5].bindings), ['HOME']);
 });
 
 test('saving preferences preserves current bindings and mounted configuration and reports failed writes', () => {
@@ -3075,6 +3309,13 @@ class Node {
   set_xy(x, y) { this.x = x; this.y = y; return this; }
   set_size(width, height = width) { this.width = width; this.height = height; return this; }
   set_scale(x, y) { this.scale_x = x; this.scale_y = y; return this; }
+  set_color(color) { this.color = color; return this; }
+  set_z(z) { this.z = z; return this; }
+  get_x() { return this.x ?? 0; }
+  get_y() { return this.y ?? 0; }
+  get_width() { return this.width ?? 0; }
+  get_height() { return this.height ?? 0; }
+  set_think_callback(callback, args) { this.think = () => callback(...args); return this; }
   set_lut(sprite, index = 1) { this.lut = { sprite, index, enabled: true }; return this; }
   disable_lut() { if (this.lut) this.lut.enabled = false; return this; }
   listen_for_hovers() { return this; }
@@ -3290,6 +3531,13 @@ function cookingHighlightHarness() {
   h.npcs[0].prototype.loved_gifts = list([1]);
   const anotherDish = { ...h.item, item_id: 1 };
   const description = renderer.makeBody('');
+  const descriptionWrites = [];
+  const nativeSetText = description.set_text.bind(description);
+  description.set_text = text => {
+    descriptionWrites.push(text);
+    description.display_text = text;
+    return nativeSetText(text);
+  };
   description.parent = Object.assign(new Node(), {
     width: 175, height: 39,
     get_width() { return this.width; }, get_height() { return this.height; },
@@ -3363,14 +3611,13 @@ function cookingHighlightHarness() {
   function select(item, base = 'A finished dish.') {
     menu.item = item;
     description.enable();
-    description.text = h.context.MistriaCompanion_description(base, { item }) ?? base;
-    description.display_text = description.text;
+    description.set_text(h.context.MistriaCompanion_description(base, { item }) ?? base);
   }
   const update = () => h.context.MistriaCompanion_update_gift_tooltips();
   const state = () => description.board_get('mistria_item_details_cooking');
   select(h.item);
   const show = () => h.context.MistriaCompanion_show_cooking_gifts(menu);
-  return { ...h, renderer, description, menu, open, anotherDish, select, update, state, show, screen };
+  return { ...h, renderer, description, descriptionWrites, menu, open, anotherDish, select, update, state, show, screen };
 }
 
 test('cooking preserves the native description and opens full highlighted gift details without ingredients', () => {
@@ -3404,6 +3651,36 @@ test('cooking preserves the native description and opens full highlighted gift d
   assert.equal(highlight.root.children.length, 1);
   assert.equal(highlight.root.parent, popup.body_text, 'reuse native item-tooltip highlight rendering');
   assert.ok(popup.backplate.height <= h.screen.y - 16);
+});
+
+test('cooking quantity refreshes never write companion extras to the visible description, even before a mod tick', () => {
+  const h = cookingHighlightHarness();
+  h.runtime.recipe_cache['0'] = 'Another recipe';
+  h.select(h.item);
+  h.update();
+  const setter = h.description.set_text;
+  h.descriptionWrites.length = 0;
+  for (const quantity of [4, 5, 38, 37, 999, 1]) {
+    h.menu.quantity = quantity;
+    const full = h.context.MistriaCompanion_description('This tea has a vegetal flavor.', { item: h.item });
+    assert.match(full, /Uses: Another recipe/);
+    assert.match(full, /Liked by:/, 'ordinary tooltips must still receive completion details');
+    assert.equal(h.description.set_text(full), h.description);
+    assert.equal(h.description.text, 'This tea has a vegetal flavor.', 'strip at assignment, not on the next tick');
+    assert.equal(h.description.display_text, 'This tea has a vegetal flavor.');
+    assert.equal(h.state().source_text, full);
+  }
+  assert.ok(h.descriptionWrites.every(text => text === 'This tea has a vegetal flavor.'));
+  h.update();
+  assert.equal(h.description.set_text, setter, 'never nest a second wrapper on a later tick');
+  h.show();
+  assert.match(h.menu.mistria_gift_popup.body_text.text, /Liked by: Balor/);
+  h.menu.mistria_gift_popup.close();
+  h.menu.context = 'crafting';
+  h.update();
+  assert.notEqual(h.description.set_text, setter, 'restore the native setter when leaving cooking');
+  h.description.set_text('Unrelated station description');
+  assert.equal(h.description.text, 'Unrelated station description');
 });
 
 test('cooking highlights follow live mouse/controller recipe selection, not ingredient tooltips', () => {
@@ -3975,7 +4252,7 @@ function settingsHarness() {
   const created = [];
   const callbacks = [
     'toggle_clock', 'show_local_sightings', 'open_wiki',
-    'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications',
+    'toggle_wiki_hints', 'toggle_all_bug_markers', 'toggle_notifications', 'show_farm_status',
   ];
   const context = load([
     privateName('hotkey_actions'), privateName('keybind_names'),
@@ -4029,18 +4306,18 @@ function settingsHarness() {
   };
 }
 
-test('Settings reference uses the six registered actions and does not duplicate or replace native pages', () => {
+test('Settings reference uses all seven registered actions and does not duplicate or replace native pages', () => {
   const { actions, runtime, menu, created, update } = settingsHarness();
-  assert.deepEqual(Array.from(actions, action => action.default_key), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10']);
+  assert.deepEqual(Array.from(actions, action => action.default_key), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4']);
   assert.equal(actions[3].callback(), 'toggle_wiki_hints');
   update();
   update();
   assert.equal(created.length, 1);
   const first = menu.option_scroller;
-  assert.equal(first.rows.length, 8);
+  assert.equal(first.rows.length, 9);
   assert.equal(first.rows[0].children[0].text, 'Mistria Companion');
-  assert.deepEqual(first.rows.slice(1, 7).map(row => row.children[0].text), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10']);
-  assert.deepEqual(first.rows.slice(1, 7).map(row => row.children[1].text), runtime.keybind_rows.map(row => row.title));
+  assert.deepEqual(first.rows.slice(1, 8).map(row => row.children[0].text), ['F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F4']);
+  assert.deepEqual(first.rows.slice(1, 8).map(row => row.children[1].text), runtime.keybind_rows.map(row => row.title));
   assert.ok(first.rows[6].y + first.rows[6].height <= 211, 'default shortcuts fit in the page in the layout fixture');
 
   // This is the native SettingsMenu category/back lifecycle.
@@ -4075,7 +4352,7 @@ test('Settings reference renders alternates and unbound actions with expanding, 
   assert.equal(rows[4].children[0].text, 'Not bound');
   assert.equal(rows[5].children[0].text, 'PAD LEFT SHOULDER + PAD RIGHT TRIGGER');
   assert.ok(rows[5].height > 24);
-  for (const row of rows.slice(1, 7)) {
+  for (const row of rows.slice(1, 8)) {
     for (const label of row.children) assert.ok(label.height + 8 <= row.height);
   }
   for (let i = 1; i < rows.length; i++) {
@@ -4137,7 +4414,7 @@ test('Mist Spot lookup reads the active index, including zero, and rejects inval
 test('Mist Spots appear in unvisited map areas, link to the wiki, and follow consumption and daily changes', () => {
   const runtime = {
     all_bug_markers_enabled: false, notifications_enabled: false,
-    map_menu: { selected_location_id: 1, hide_requests: 0 },
+    map_menu: { selected_location_id: 1, hide_requests: 0, map: new Node().set_size(200, 150) },
     map_wiki_nodes: [], map_signature: '', dig_spot_visit_key: '', dig_spots: [],
   };
   const spots = [
@@ -4154,13 +4431,14 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   };
   const context = load([
     privateName('active_mist_spot'), privateName('hub_index'), privateName('create_mist_marker'),
-    publicName('refresh_map_markers'), privateName('set_wiki_title'),
+    publicName('refresh_map_markers'), publicName('mist_marker_think'), privateName('set_wiki_title'),
     privateName('resolve_wiki_title'), publicName('open_wiki'),
   ], {
     __MistriaCompanion_runtime: () => runtime,
     __MistriaCompanion_ready: () => true,
     __MistriaCompanion_menu: kind => kind === 'map' ? runtime.map_menu : undefined,
     __MistriaCompanion_location_name: id => `Area ${id}`,
+    __MistriaCompanion_dig_spot_visit_key: () => 'visit',
     __MistriaCompanion_hover_label: () => new Node().set_alpha(0),
     __MistriaCompanion_notify: () => {},
     MistriaCompanion_add_map_labels: () => {},
@@ -4189,6 +4467,7 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
     },
     COMMON_LUT: 0,
     spr_misty_spot_main_closed_idle: 14,
+    c_black: 0,
     sprite_get_width: sprite => { assert.equal(sprite, 14); return 48; },
     sprite_get_height: sprite => { assert.equal(sprite, 14); return 40; },
     sprite_get_xoffset: sprite => { assert.equal(sprite, 14); return 24; },
@@ -4197,7 +4476,7 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
     clipboard_set_text: text => clipboard.push(text),
     mmapi_warn_rate_limited: () => assert.fail('Unexpected invalid Mist Spot data'),
   });
-  let hubs = [{ node: new Node() }];
+  let hubs = [{ node: new Node().set_xy(80, 60) }];
   const refresh = () => context.MistriaCompanion_refresh_map_markers(hubs);
   refresh();
   const marker = hubs[0].node.board_get('mistria_item_details_mist_marker');
@@ -4210,7 +4489,28 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   assert.deepEqual([cloud.x + 24 * (1 - cloud.scale_x), cloud.y + 26 * (1 - cloud.scale_y)], [0, 0],
     'scaled world-sprite origins must not offset the drawing away from its hover target');
   assert.equal(marker.cache_is_dirty, true, 'late-created positional roots need their native cache initialized');
+  const outline = marker.board_get('outline');
+  assert.equal(outline.length, 8, 'surround the silhouette by one UI pixel, including diagonals');
+  assert.deepEqual(Array.from(outline, node => [node.x - cloud.x, node.y - cloud.y]),
+    [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]);
+  for (const edge of outline) {
+    assert.equal(edge.sprite, cloud.sprite);
+    assert.equal(edge.color, 0);
+    assert.ok(edge.z > cloud.z, 'outline silhouettes draw behind the untouched pink artwork');
+    assert.deepEqual([edge.scale_x, edge.scale_y], [0.5, 0.5]);
+  }
+  assert.notEqual(cloud.color, 0);
   assert.deepEqual([marker.x, marker.y], [-10, 10]);
+  for (const [x, y] of [[195, 145], [0, 0], [0, 145], [195, 0]]) {
+    hubs[0].node.set_xy(x, y);
+    marker.think();
+    assert.ok(x + marker.x >= 1 && y + marker.y >= 1);
+    assert.ok(x + marker.x + marker.width <= 199);
+    assert.ok(y + marker.y + marker.height <= 149);
+  }
+  hubs[0].node.set_xy(80, 60);
+  marker.think();
+  assert.deepEqual([marker.x, marker.y], [-10, 10], 'clamping does not accumulate offsets');
   assert.equal(marker.board_get('label').text, 'Mist Spot');
   assert.equal(marker.board_get('label').alpha, 0);
   assert.equal(routes[0].location_id, 1, 'routes from the spot, not the player');
@@ -4227,6 +4527,17 @@ test('Mist Spots appear in unvisited map areas, link to the wiki, and follow con
   marker.hovered = true;
   context.MistriaCompanion_open_wiki();
   assert.deepEqual(clipboard, ['https://fieldsofmistria.wiki.gg/wiki/Mist_Spot']);
+
+  const originalRoute = runtime.map_menu.find_hub_for;
+  runtime.map_menu.selected_location_id = 0;
+  runtime.map_menu.find_hub_for = () => hubs[0];
+  refresh();
+  assert.equal(marker.enabled, false, 'do not route the mist to an exit on a different area tab');
+  assert.equal(runtime.map_wiki_nodes.length, 0);
+  runtime.map_menu.selected_location_id = 1;
+  runtime.map_menu.find_hub_for = originalRoute;
+  refresh();
+  assert.equal(marker.enabled, true);
 
   context.MIST_SIGHT_ACTIVE_INDEX = 1;
   refresh();
@@ -4391,6 +4702,171 @@ test('tooltip bounds keep a store tooltip inside the screen without erasing its 
   });
   context.__MistriaCompanion_fit_node(plate);
   assert.deepEqual([plate.x, plate.y], [216, 236]);
+});
+
+function divingNoticeHarness() {
+  const runtime = { notifications_enabled: true };
+  const state = { key: 'day:area:visit', traveling: false, cutscene: false, paused: false,
+    ready: true, menuAvailable: true, accept: true };
+  const actors = [];
+  const notices = [];
+  const toasts = [];
+  const warnings = [];
+  const feedback = [];
+  let scans = 0;
+  const menu = {
+    hide_requests: 0, canvas: { get_enabled: () => true, get_alpha: () => 1 },
+    toasts: { last: () => toasts.at(-1) },
+    create_notification(text, duck) {
+      notices.push({ text, duck });
+      if (!state.accept) return false;
+      const node = {
+        alpha: 1, freed: false, timer: 240,
+        set_alpha(value) { this.alpha = value; return this; },
+        set_think_callback(callback, args) { this.think = () => callback(...args); return this; },
+      };
+      toasts.push(node);
+      return true;
+    },
+  };
+  const context = load([
+    privateName('count_diving_spots'),
+    ...['detect_diving_spots', 'diving_notice_think', 'reset_local_sightings',
+      'reset_save', 'toggle_notifications'].map(publicName),
+  ], {
+    __MistriaCompanion_runtime: () => runtime,
+    __MistriaCompanion_local_visit_key: () => state.key,
+    __MistriaCompanion_sightings_transition_active: () => state.traveling,
+    __MistriaCompanion_dig_notice_blocked: () => state.cutscene,
+    __MistriaCompanion_ready: () => state.ready,
+    __MistriaCompanion_menu: () => state.menuAvailable ? menu : undefined,
+    __MistriaCompanion_save_preferences: () => true,
+    __MistriaCompanion_notify: text => feedback.push(text),
+    GRID: { is_setup: true, node_counter: 1 },
+    Menu: { InfoToasts: 'toasts' }, ANCHOR: { wrap_for_local: text => text },
+    obj_divespot: 'diving-spot',
+    game_paused: () => state.paused,
+    instance_number: kind => { assert.equal(kind, 'diving-spot'); scans++; return actors.length; },
+    instance_find: (_, index) => actors[index],
+    instance_exists: actor => { assert.notEqual(actor, undefined); return actor.alive !== false; },
+    mmapi_warn_rate_limited: (...args) => warnings.push(args),
+  });
+  function advance(frames = 13) {
+    for (let i = 0; i < frames; i++) {
+      context.MistriaCompanion_detect_diving_spots();
+      for (const toast of toasts) toast.think();
+    }
+  }
+  const spot = () => { const actor = { dive_loot: {}, visible: true }; actors.push(actor); return actor; };
+  return { runtime, state, context, actors, notices, toasts, menu, warnings, feedback, advance, spot,
+    scans: () => scans };
+}
+
+test('diving alerts count only active initialized spots once per visit without pausing gameplay', () => {
+  const h = divingNoticeHarness();
+  h.spot(); h.spot();
+  h.actors.push(undefined, { alive: false }, { visible: false });
+  h.advance(12);
+  assert.equal(h.notices.length, 0);
+  h.advance(1);
+  assert.deepEqual(h.notices, [{ text: 'Diving spots: 2', duck: undefined }]);
+  assert.equal(h.state.paused, false);
+  h.context.GRID.node_counter++;
+  h.spot();
+  h.advance(100);
+  assert.equal(h.notices.length, 1, 'ordinary grid changes and repeat ticks do not repeat the entry alert');
+  assert.equal(h.scans(), 1, 'do not continually rescan an already reported visit');
+});
+
+test('diving alerts defer through menus and cutscenes and recount only remaining spots', () => {
+  const h = divingNoticeHarness();
+  const used = h.spot();
+  h.spot();
+  h.state.cutscene = true;
+  h.advance(30);
+  assert.equal(h.scans(), 0, 'cutscene-deactivated instances must not be mistaken for an empty area');
+  used.alive = false; // Native dive completion destroys the collected spot.
+  h.state.cutscene = false;
+  h.state.paused = true;
+  h.advance(30);
+  assert.equal(h.notices.length, 0);
+  h.state.paused = false;
+  h.advance();
+  assert.equal(h.notices[0].text, 'Diving spots: 1');
+  h.state.cutscene = true;
+  h.advance(1);
+  assert.equal(h.toasts[0].alpha, 0);
+  assert.equal(h.toasts[0].timer, 240, 'do not reorder or shorten the native FIFO notification lifetimes');
+});
+
+test('diving alerts honor F10 and do not replay an old visit when enabled', () => {
+  const h = divingNoticeHarness();
+  h.runtime.notifications_enabled = false;
+  h.spot();
+  h.advance();
+  assert.equal(h.notices.length, 0);
+  h.context.MistriaCompanion_toggle_notifications();
+  h.advance();
+  assert.equal(h.notices.length, 0);
+  h.state.key = 'day:another-area:visit';
+  h.advance();
+  assert.equal(h.notices.length, 1);
+  h.context.MistriaCompanion_toggle_notifications();
+  assert.equal(h.toasts[0].alpha, 0);
+  const pending = divingNoticeHarness();
+  pending.spot();
+  pending.advance(3);
+  pending.context.MistriaCompanion_toggle_notifications();
+  pending.context.MistriaCompanion_toggle_notifications();
+  pending.advance(30);
+  assert.equal(pending.notices.length, 0, 'toggling off cancels a deferred count permanently for the visit');
+});
+
+test('diving notices do not flash during departure and equal counts in new areas still display', () => {
+  const h = divingNoticeHarness();
+  h.spot();
+  h.advance();
+  const previous = h.toasts[0];
+  h.context.MistriaCompanion_reset_local_sightings({});
+  assert.equal(previous.alpha, 0);
+  h.state.traveling = true;
+  h.advance(31);
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.runtime.diving_spot_visit, undefined);
+  h.state.traveling = false;
+  h.state.key = 'day:new-area:visit';
+  h.advance();
+  assert.deepEqual(h.notices.map(n => n.text), ['Diving spots: 1', 'Diving spots: 1']);
+  h.context.MistriaCompanion_reset_save({});
+  assert.equal(h.runtime.diving_spot_visit, undefined);
+});
+
+test('diving alerts skip empty areas and retry uninitialized spot or menu data explicitly', () => {
+  const empty = divingNoticeHarness();
+  empty.advance();
+  assert.equal(empty.notices.length, 0);
+  const h = divingNoticeHarness();
+  const spot = h.spot();
+  spot.dive_loot = undefined;
+  h.advance();
+  assert.equal(h.notices.length, 0);
+  assert.equal(h.warnings.length, 1);
+  spot.dive_loot = {};
+  h.state.menuAvailable = false;
+  h.advance(1);
+  assert.equal(h.notices.length, 0);
+  assert.equal(h.warnings.length, 2);
+  h.state.menuAvailable = true;
+  h.advance(1);
+  assert.equal(h.notices[0].text, 'Diving spots: 1');
+  const stale = divingNoticeHarness();
+  const used = stale.spot();
+  stale.state.cutscene = true;
+  stale.advance();
+  used.alive = false;
+  stale.state.cutscene = false;
+  stale.advance();
+  assert.equal(stale.notices.length, 0, 'used spots cannot produce a stale deferred notice');
 });
 
 function digNoticeHarness() {
@@ -4821,6 +5297,7 @@ test('tick retries initialization, resets visit/day observations, and throttles 
     __MistriaCompanion_map_hubs: () => [],
     MistriaCompanion_detect_dig_spots: () => { scans++; runtime.dig_spot_delay = -1; },
     MistriaCompanion_show_dig_spot_notice: () => { assert.equal(ready, true); },
+    MistriaCompanion_detect_diving_spots: () => { assert.equal(ready, true); },
     MistriaCompanion_update_birthday_label: () => {},
     MistriaCompanion_add_map_labels: () => {},
     MistriaCompanion_refresh_map_markers: () => refreshes++,

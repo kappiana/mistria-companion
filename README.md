@@ -18,7 +18,9 @@ Mistria Companion adds item information and quality-of-life tools to Fields of M
 - Shows one combined local F6 notice for active bugs, bugs caught during the current visit, and currently active legendary fish.
 - Groups active bugs into one marker per map hub, with species and counts on hover and ordinary bugs shown by default.
 - Optionally announces active dig spots when entering a location or mine floor and marks their general areas at the nearest map hubs.
+- Optionally announces the number of diving spots when entering an area.
 - Reveals the active daily Mist Spot on its area's map, even before visiting that area.
+- Opens a farm-status menu with crop and empty-soil totals for the farm and greenhouse.
 - Pauses natural clock progression without pausing gameplay or overriding the game's own clock stops.
 - Lists the mod's active keybindings on the otherwise-empty right side of the Settings landing page.
 
@@ -63,7 +65,7 @@ launch, or when upgrading without a saved preference:
 
 | Setting | Default | Change it with |
 | --- | --- | --- |
-| Automatic alerts for all bugs, legendary fish, and dig spots | **Off** | **F10** |
+| Automatic alerts for bugs, legendary fish, dig spots, and diving spots | **Off** | **F10** |
 | Ordinary bugs on the map, alongside very rare bugs | **On** | **F9** |
 | Compact `F7 Wiki` hints | **On** | **F8** |
 
@@ -83,12 +85,13 @@ They appear afterward only if you are still in the same area or mine-floor visit
 
 | Key | Action |
 | --- | --- |
+| **F4** | Open farm status, including the greenhouse. |
 | **F5** | Pause natural clock progression or release the companion's pause. |
 | **F6** | Show current-area bug counts and active legendary fish together in one left-side notice. |
 | **F7** | Copy the relevant Fields of Mistria Wiki URL while supported content is selected or hovered. |
 | **F8** | Show or hide the compact `F7 Wiki` hints. |
 | **F9** | Show or hide ordinary bug map markers. |
-| **F10** | Turn automatic spawn and dig-spot alerts on or off. |
+| **F10** | Turn automatic spawn, dig-spot, and diving-spot alerts on or off. |
 
 Paste copied wiki links into a browser with `Ctrl+V`.
 
@@ -131,6 +134,34 @@ Releasing the pause does not undo a cutscene or another mod's pause. Sleeping,
 crafting, and other scripted time changes are not frozen. Loading a save or
 returning to the title screen clears the pause and recorded sightings. Unlike
 the F8/F9/F10 preferences, the clock pause does not carry over to a new session.
+
+## Farm status
+
+Press **F4** during gameplay to open a farm-status menu. It shows **combined
+totals**, followed by separate **Farm** and **Greenhouse** sections:
+
+- Empty tilled spots.
+- Plants ready to harvest.
+- Planted crops that are not ready to harvest.
+- Unwatered crops.
+
+The menu uses a fresh snapshot each time it opens, including the greenhouse
+when you are elsewhere. It does not harvest, water, plant, or change anything.
+Close the menu and reopen it to refresh the counts. Long reports scroll using
+the same native menu controls as gift details.
+
+Plant counts refer to crop plants on tilled soil, not how many items they will
+yield. Fruit trees and wild forage on untilled ground are excluded. Wilted plants
+and other objects block a spot from being counted as empty. The unwatered count
+is for planted crops, not unused soil.
+
+If you have no greenhouse, its section says so. If a built greenhouse's data
+is unavailable, the mod reports that the data is not ready rather than showing
+misleading zero totals.
+
+F4 is independent of automatic notifications. The `farm_status` and
+`farm_status_alternate` settings let you remap it. Existing key remaps keep their
+priority if they already use F4; assign another farm-status binding in that case.
 
 ## Gifts and cooking
 
@@ -177,6 +208,9 @@ the item. Highlights follow the tooltip's position and fade, including in shops.
 No extra save data or configuration is needed.
 
 ### Cooking Gift details
+
+Changing the cooking quantity keeps recipe-use and gift-list text out of the
+main dish description, without a brief flash of those extra lines.
 
 At a **cooking station**, select a dish and use the **Gifts** button beside its
 description to open **Gift details**. The popup shows the full liked/loved lists
@@ -277,7 +311,9 @@ The file contains these defaults:
   "bugs": "F9",
   "bugs_alternate": "",
   "notifications": "F10",
-  "notifications_alternate": ""
+  "notifications_alternate": "",
+  "farm_status": "F4",
+  "farm_status_alternate": ""
 }
 ```
 
@@ -297,7 +333,7 @@ preserved when upgrading.
 
 ### Automatic bug and legendary-fish alerts
 
-Automatic alerts for **all bug species**, legendary fish, and dig spots are
+Automatic alerts for **all bug species**, legendary fish, dig spots, and diving spots are
 **off by default**. Press **F10** to enable or disable them as a
 group; your choice is remembered next time you play. Enabling alerts affects new
 spawns and visits rather than replaying old notices.
@@ -387,10 +423,24 @@ loading another save, or disabling automatic alerts discards the pending notice.
 If a cutscene starts while a dig notice is visible, that notice is hidden.
 Scanning and map markers are unaffected.
 
+### Diving spots
+
+With **F10** alerts enabled, entering an area with diving spots shows one
+sliding **Diving spots: N** notification. It counts the current area's diving
+spots, not dungeon-entry whirlpools, and does not reveal their loot.
+
+The notice waits for the actual transition, menus, and cutscenes to finish,
+then counts only spots still present. Empty areas do not generate a notice.
+Leaving the area or disabling alerts cancels a pending notice; visible diving
+notices hide when leaving, opening a menu, or starting a cutscene. As with dig
+alerts, enabling F10 mid-visit does not replay an old entry count.
+
 ### Daily Mist Spot
 
 The active daily **Mist Spot** uses the actual pink mist-cloud artwork seen in
-the world, scaled down for the map—not the Mist Sight skill symbol.
+the world, scaled down for the map with a black outline—not the Mist Sight skill
+symbol. The marker stays inside the map image and appears only on the area tab
+that contains the spot, not on neighboring-area exits.
 Browse the map's area tabs to locate it; you do not need to visit its area first.
 The icon marks its nearest map hub, not exact world coordinates. Hover for the
 label **Mist Spot**, without a location name, or press **F7** while hovering to

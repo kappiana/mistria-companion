@@ -22,6 +22,7 @@ function __MistriaCompanion_runtime() {
             seen_spawns: {},
             local_sightings: undefined,
             sightings_replay: undefined,
+            farm_status_popup: undefined,
             birthday_day: "",
             birthday_text: "",
             language: undefined,
@@ -37,7 +38,8 @@ function __MistriaCompanion_runtime() {
             dig_spot_visit_key: "",
             dig_spot_delay: -1,
             dig_spot_notice: undefined,
-            dig_spots: []
+            dig_spots: [],
+            diving_spot_visit: undefined
         };
     }
     return global.__mistria_item_details;
@@ -82,6 +84,7 @@ function MistriaCompanion_reset_save(_ctx) {
     _runtime.seen_spawns = {};
     _runtime.local_sightings = undefined;
     _runtime.sightings_replay = undefined;
+    _runtime.farm_status_popup = undefined;
     _runtime.birthday_day = "";
     _runtime.birthday_text = "";
     _runtime.visit_grid = undefined;
@@ -91,6 +94,7 @@ function MistriaCompanion_reset_save(_ctx) {
     _runtime.dig_spot_delay = -1;
     _runtime.dig_spot_notice = undefined;
     _runtime.dig_spots = [];
+    _runtime.diving_spot_visit = undefined;
     _runtime.map_menu = undefined;
     _runtime.map_node = undefined;
     _runtime.map_signature = "";
@@ -112,7 +116,8 @@ function __MistriaCompanion_hotkey_actions() {
         { key: "wiki", title: "Copy current wiki link", default_key: "F7", callback: MistriaCompanion_open_wiki },
         { key: "wiki_hints", title: "Show / hide wiki hints", default_key: "F8", callback: MistriaCompanion_toggle_wiki_hints },
         { key: "bugs", title: "Show / hide ordinary bugs", default_key: "F9", callback: MistriaCompanion_toggle_all_bug_markers },
-        { key: "notifications", title: "Toggle automatic alerts", default_key: "F10", callback: MistriaCompanion_toggle_notifications }
+        { key: "notifications", title: "Toggle automatic alerts", default_key: "F10", callback: MistriaCompanion_toggle_notifications },
+        { key: "farm_status", title: "Farm status", default_key: "F4", callback: MistriaCompanion_show_farm_status }
     ];
 }
 
@@ -985,6 +990,81 @@ function MistriaCompanion_detect_dig_spots() {
     _runtime.dig_spot_notice = { grid: GRID, visit_key: _visit_key, wait_frames: 12 };
 }
 
+function __MistriaCompanion_count_diving_spots() {
+    var _count = 0;
+    var _length = instance_number(obj_divespot);
+    for (var _index = 0; _index < _length; _index++) {
+        var _spot = instance_find(obj_divespot, _index);
+        if (_spot == undefined || !instance_exists(_spot)
+            || __MistriaCompanion_field(_spot, "visible") == false) continue;
+        if (__MistriaCompanion_field(_spot, "dive_loot") == undefined) {
+            mmapi_warn_rate_limited("mistria_item_details:diving_ready", "mistria_item_details",
+                "Waiting for diving-spot data before showing the area count.");
+            return undefined;
+        }
+        _count++;
+    }
+    return _count;
+}
+
+function MistriaCompanion_diving_notice_think(_node, _visit) {
+    if (_node.freed) return;
+    var _runtime = __MistriaCompanion_runtime();
+    if (!__MistriaCompanion_ready() || !_runtime.notifications_enabled
+        || _runtime.diving_spot_visit != _visit || GRID != _visit.grid
+        || __MistriaCompanion_local_visit_key() != _visit.key
+        || __MistriaCompanion_sightings_transition_active() || game_paused()
+        || __MistriaCompanion_dig_notice_blocked())
+    {
+        // Leave the native queue and its FIFO lifecycle untouched.
+        _node.set_alpha(0);
+    }
+}
+
+function MistriaCompanion_detect_diving_spots() {
+    var _runtime = __MistriaCompanion_runtime();
+    if (GRID == undefined || __MistriaCompanion_sightings_transition_active()) {
+        _runtime.diving_spot_visit = undefined;
+        return;
+    }
+    if (__MistriaCompanion_field(GRID, "is_setup") != true) return;
+    var _key = __MistriaCompanion_local_visit_key();
+    var _visit = _runtime.diving_spot_visit;
+    if (_visit == undefined || _visit.grid != GRID || _visit.key != _key) {
+        _visit = {
+            grid: GRID, key: _key, pending: _runtime.notifications_enabled,
+            wait_frames: 12, toast: undefined
+        };
+        _runtime.diving_spot_visit = _visit;
+    }
+    if (!_runtime.notifications_enabled) _visit.pending = false;
+    if (!_visit.pending) return;
+    if (game_paused() || __MistriaCompanion_dig_notice_blocked()) {
+        _visit.wait_frames = 12;
+        return;
+    }
+    if (_visit.wait_frames > 0) {
+        _visit.wait_frames--;
+        return;
+    }
+    var _menu = __MistriaCompanion_menu(Menu.InfoToasts);
+    if (_menu == undefined) {
+        mmapi_warn_rate_limited("mistria_item_details:diving_menu", "mistria_item_details",
+            "Waiting for the notification menu to show the diving-spot count.");
+        return;
+    }
+    if (_menu.hide_requests > 0 || !_menu.canvas.get_enabled() || _menu.canvas.get_alpha() <= 0) return;
+    var _count = __MistriaCompanion_count_diving_spots();
+    if (_count == undefined) return;
+    _visit.pending = false;
+    if (_count == 0) return;
+    // Visit state handles duplicates; equal counts in different areas must not suppress each other.
+    if (_menu.create_notification(ANCHOR.wrap_for_local("Diving spots: " + string(_count)), undefined)) {
+        _visit.toast = _menu.toasts.last();
+        _visit.toast.set_think_callback(MistriaCompanion_diving_notice_think, [_visit.toast, _visit]);
+    }
+}
+
 function __MistriaCompanion_legendary_day_key() {
     return string(total_days());
 }
@@ -1060,6 +1140,9 @@ function __MistriaCompanion_retire_sightings_notice(_node) {
 
 function MistriaCompanion_reset_local_sightings(_ctx) {
     var _runtime = __MistriaCompanion_runtime();
+    var _diving = _runtime.diving_spot_visit;
+    if (_diving != undefined && _diving.toast != undefined && !_diving.toast.freed) _diving.toast.set_alpha(0);
+    _runtime.diving_spot_visit = undefined;
     var _replay = _runtime.sightings_replay;
     if (_replay != undefined) __MistriaCompanion_retire_sightings_notice(_replay.toast);
     _runtime.local_sightings = undefined;
@@ -1433,6 +1516,170 @@ function MistriaCompanion_replay_local_sightings() {
         [_replay.toast, _replay.local, _replay.automatic]);
 }
 
+function __MistriaCompanion_farm_status_unavailable(_reason) {
+    mmapi_warn_rate_limited("mistria_item_details:farm_status", "mistria_item_details",
+        "Farm status unavailable: " + _reason);
+    return undefined;
+}
+
+function __MistriaCompanion_farm_status_counts() {
+    return { empty: 0, ready: 0, growing: 0, unwatered: 0 };
+}
+
+function __MistriaCompanion_scan_farm_grid(_grid, _find_greenhouses) {
+    var _dims = __MistriaCompanion_field(_grid, "dims");
+    var _width = __MistriaCompanion_field(_dims, "x");
+    var _height = __MistriaCompanion_field(_dims, "y");
+    var _length = __MistriaCompanion_field(_grid, "node_len");
+    if (!is_real(_width) || !is_real(_height) || _width < 1 || _height < 1
+        || _width != floor(_width) || _height != floor(_height) || _length != _width * _height
+        || typeof(__MistriaCompanion_field(_grid, "node_index_for_cell")) != "method")
+    {
+        return __MistriaCompanion_farm_status_unavailable("a farm or greenhouse grid has not loaded.");
+    }
+    var _arrays = ["node_parent", "node_object_id", "node_terrain_ground_kind", "node_terrain_is_watered"];
+    for (var _index = 0; _index < array_length(_arrays); _index++) {
+        var _array = __MistriaCompanion_field(_grid, _arrays[_index]);
+        if (!is_array(_array) || array_length(_array) < _length) {
+            return __MistriaCompanion_farm_status_unavailable("a grid's crop or terrain data is incomplete.");
+        }
+    }
+    var _counts = __MistriaCompanion_farm_status_counts();
+    var _greenhouses = [];
+    var _seen = {};
+    for (var _index = 0; _index < _length; _index++) {
+        var _node = _grid.node_parent[_index];
+        if (_node == undefined) {
+            if (_grid.node_object_id[_index] != undefined) {
+                return __MistriaCompanion_farm_status_unavailable("an occupied grid cell has no object data.");
+            }
+            continue;
+        }
+        var _x = __MistriaCompanion_field(_node, "top_left_x");
+        var _y = __MistriaCompanion_field(_node, "top_left_y");
+        var _prototype = __MistriaCompanion_field(_node, "prototype");
+        if (!is_real(_x) || !is_real(_y) || _x < 0 || _y < 0 || _x >= _width || _y >= _height
+            || _x != floor(_x) || _y != floor(_y) || _prototype == undefined)
+        {
+            return __MistriaCompanion_farm_status_unavailable("an object's grid position or prototype is unavailable.");
+        }
+        var _root = _grid.node_index_for_cell(_x, _y);
+        var _key = string(_root);
+        if (__MistriaCompanion_field(_seen, _key) == true) continue;
+        _seen[$ _key] = true;
+        if (_find_greenhouses
+            && __MistriaCompanion_field(_prototype, "player_building_kind") == PlayerBuildingKind.Greenhouse)
+        {
+            var _dyn_index = __MistriaCompanion_field(_node, "dyn_index");
+            if (!is_real(_dyn_index) || _dyn_index < 0 || _dyn_index != floor(_dyn_index)) {
+                return __MistriaCompanion_farm_status_unavailable("a greenhouse has no valid interior index.");
+            }
+            array_push(_greenhouses, _dyn_index);
+        }
+        if (_prototype.category_id != ObjectCategory.Crop
+            || _grid.node_terrain_ground_kind[_root] != GroundKind.Soil) continue;
+        if (_grid.node_terrain_is_watered[_root] == undefined) {
+            return __MistriaCompanion_farm_status_unavailable("a planted crop's watering state is unavailable.");
+        }
+        if (can_interact(_node)) _counts.ready++;
+        else _counts.growing++;
+        if (!_grid.node_terrain_is_watered[_root]) _counts.unwatered++;
+    }
+    // A plantable plot is 2x2 native grid cells; occupied or partially tilled plots are not empty.
+    for (var _y = 0; _y + 1 < _height; _y += 2) {
+        for (var _x = 0; _x + 1 < _width; _x += 2) {
+            var _empty = true;
+            for (var _dy = 0; _dy < 2; _dy++) {
+                for (var _dx = 0; _dx < 2; _dx++) {
+                    var _index = _grid.node_index_for_cell(_x + _dx, _y + _dy);
+                    if (_grid.node_terrain_ground_kind[_index] != GroundKind.Soil
+                        || _grid.node_object_id[_index] != undefined || _grid.node_parent[_index] != undefined)
+                    {
+                        _empty = false;
+                    }
+                }
+            }
+            if (_empty) _counts.empty++;
+        }
+    }
+    return { counts: _counts, greenhouses: _greenhouses };
+}
+
+function __MistriaCompanion_farm_status_add(_total, _counts) {
+    _total.empty += _counts.empty;
+    _total.ready += _counts.ready;
+    _total.growing += _counts.growing;
+    _total.unwatered += _counts.unwatered;
+}
+
+function __MistriaCompanion_farm_status_snapshot() {
+    if (!is_array(GRIDS) || LocationId.Farm >= array_length(GRIDS)) {
+        return __MistriaCompanion_farm_status_unavailable("the farm grid registry is not ready.");
+    }
+    var _farm = __MistriaCompanion_scan_farm_grid(GRIDS[LocationId.Farm], true);
+    if (_farm == undefined) return undefined;
+    var _report = {
+        farm: _farm.counts, greenhouse: __MistriaCompanion_farm_status_counts(),
+        total: __MistriaCompanion_farm_status_counts(), greenhouse_count: 0
+    };
+    var _seen = {};
+    for (var _index = 0; _index < array_length(_farm.greenhouses); _index++) {
+        var _dyn_index = _farm.greenhouses[_index];
+        var _key = string(_dyn_index);
+        if (__MistriaCompanion_field(_seen, _key) == true) continue;
+        _seen[$ _key] = true;
+        if (DYNAMIC_GRIDS == undefined
+            || typeof(__MistriaCompanion_field(DYNAMIC_GRIDS, "count")) != "method"
+            || typeof(__MistriaCompanion_field(DYNAMIC_GRIDS, "get")) != "method"
+            || _dyn_index >= DYNAMIC_GRIDS.count())
+        {
+            return __MistriaCompanion_farm_status_unavailable("a built greenhouse's interior is not loaded.");
+        }
+        var _greenhouse = __MistriaCompanion_scan_farm_grid(DYNAMIC_GRIDS.get(_dyn_index), false);
+        if (_greenhouse == undefined) return undefined;
+        __MistriaCompanion_farm_status_add(_report.greenhouse, _greenhouse.counts);
+        _report.greenhouse_count++;
+    }
+    __MistriaCompanion_farm_status_add(_report.total, _report.farm);
+    __MistriaCompanion_farm_status_add(_report.total, _report.greenhouse);
+    return _report;
+}
+
+function __MistriaCompanion_farm_status_section(_title, _counts) {
+    return _title + "\nEmpty tilled spots: " + string(_counts.empty)
+        + "\nReady to harvest: " + string(_counts.ready)
+        + "\nPlanted, not ready: " + string(_counts.growing)
+        + "\nUnwatered crops: " + string(_counts.unwatered);
+}
+
+function MistriaCompanion_show_farm_status() {
+    var _runtime = __MistriaCompanion_runtime();
+    var _existing = _runtime.farm_status_popup;
+    if (_existing != undefined && !_existing.close_requested && !_existing.free_requested) return;
+    if (!__MistriaCompanion_ready()) {
+        __MistriaCompanion_notify("Farm status is available during gameplay.", 60 * 2);
+        return;
+    }
+    if (game_paused() || __MistriaCompanion_dig_notice_blocked()
+        || __MistriaCompanion_sightings_transition_active())
+    {
+        __MistriaCompanion_notify("Close menus or dialogue and finish traveling before opening farm status.", 60 * 3);
+        return;
+    }
+    var _report = __MistriaCompanion_farm_status_snapshot();
+    if (_report == undefined) {
+        __MistriaCompanion_notify("Farm status data is not ready. Try again after the game finishes loading.", 60 * 3);
+        return;
+    }
+    var _text = __MistriaCompanion_farm_status_section("Combined totals", _report.total)
+        + "\n\n" + __MistriaCompanion_farm_status_section("Farm", _report.farm)
+        + "\n\n" + __MistriaCompanion_farm_status_section("Greenhouse", _report.greenhouse);
+    if (_report.greenhouse_count == 0) _text += "\nNo greenhouse built.";
+    var _popup = __MistriaCompanion_text_popup("Farm status", _text);
+    _runtime.farm_status_popup = _popup;
+    _popup.spawn();
+}
+
 function MistriaCompanion_toggle_clock() {
     if (!__MistriaCompanion_ready()) {
         __MistriaCompanion_notify("Clock controls are available during gameplay.", 60);
@@ -1482,7 +1729,14 @@ function MistriaCompanion_toggle_all_bug_markers() {
 function MistriaCompanion_toggle_notifications() {
     var _runtime = __MistriaCompanion_runtime();
     _runtime.notifications_enabled = !_runtime.notifications_enabled;
-    if (!_runtime.notifications_enabled) _runtime.dig_spot_notice = undefined;
+    if (!_runtime.notifications_enabled) {
+        _runtime.dig_spot_notice = undefined;
+        var _diving = _runtime.diving_spot_visit;
+        if (_diving != undefined) {
+            _diving.pending = false;
+            if (_diving.toast != undefined && !_diving.toast.freed) _diving.toast.set_alpha(0);
+        }
+    }
     var _saved = __MistriaCompanion_save_preferences();
     __MistriaCompanion_notify(
         (_runtime.notifications_enabled ? "Automatic alerts enabled." : "Automatic alerts disabled.")
@@ -2137,7 +2391,22 @@ function __MistriaCompanion_active_mist_spot() {
     return _spot;
 }
 
-function __MistriaCompanion_create_mist_marker(_parent) {
+function MistriaCompanion_mist_marker_think(_marker, _hub, _map) {
+    if (_marker.freed || _hub.freed) return;
+    if (_map == undefined || _map.freed) {
+        _marker.set_alpha(0);
+        return;
+    }
+    if (_map.get_width() < _marker.get_width() + 2 || _map.get_height() < _marker.get_height() + 2) {
+        _marker.set_alpha(0);
+        return;
+    }
+    var _x = max(1, min(_hub.get_x() - 10, _map.get_width() - _marker.get_width() - 1));
+    var _y = max(1, min(_hub.get_y() + 10, _map.get_height() - _marker.get_height() - 1));
+    _marker.set_xy(_x - _hub.get_x(), _y - _hub.get_y()).set_alpha(1);
+}
+
+function __MistriaCompanion_create_mist_marker(_parent, _map) {
     var _sprite = spr_misty_spot_main_closed_idle;
     var _scale = 0.5;
     var _marker = ANCHOR.positional(_parent).set_xy(-10, 10)
@@ -2145,11 +2414,22 @@ function __MistriaCompanion_create_mist_marker(_parent) {
         .listen_for_hovers();
     _marker.cache_is_dirty = true;
     // Anchor adds unscaled sprite origins; compensate to keep the cloud inside its hover bounds.
+    var _x = sprite_get_xoffset(_sprite) * (_scale - 1);
+    var _y = sprite_get_yoffset(_sprite) * (_scale - 1);
+    var _offsets = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+    var _outline = [];
+    for (var _index = 0; _index < array_length(_offsets); _index++) {
+        array_push(_outline, ANCHOR.sprite(_marker).set_sprite(_sprite).set_scale(_scale, _scale)
+            .set_xy(_x + _offsets[_index][0], _y + _offsets[_index][1])
+            .set_color(c_black).set_z(1).disable_lut());
+    }
     var _cloud = ANCHOR.sprite(_marker).set_sprite(_sprite).set_scale(_scale, _scale)
-        .set_xy(sprite_get_xoffset(_sprite) * (_scale - 1), sprite_get_yoffset(_sprite) * (_scale - 1))
-        .disable_lut();
+        .set_xy(_x, _y).set_z(0).disable_lut();
+    _marker.board_set("outline", _outline);
     _marker.board_set("cloud", _cloud);
     _marker.board_set("label", __MistriaCompanion_hover_label(_marker));
+    _marker.set_think_callback(MistriaCompanion_mist_marker_think, [_marker, _parent, _map]);
+    MistriaCompanion_mist_marker_think(_marker, _parent, _map);
     return _marker;
 }
 
@@ -2158,6 +2438,8 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
     var _bugs = [];
     var _spots = [];
     var _mist = __MistriaCompanion_active_mist_spot();
+    if (_mist != undefined
+        && LOCATIONS[_mist.location_id].map_location != _runtime.map_menu.selected_location_id) _mist = undefined;
     var _signature = string(_runtime.all_bug_markers_enabled) + ":";
     var _location_matches = LOCATIONS[CURRENT_LOCATION_ID].map_location
         == _runtime.map_menu.selected_location_id;
@@ -2279,7 +2561,7 @@ function MistriaCompanion_refresh_map_markers(_hubs) {
         var _mist_marker = _hub.node.board_get("mistria_item_details_mist_marker");
         if (_group.mist) {
             if (_mist_marker == undefined) {
-                _mist_marker = __MistriaCompanion_create_mist_marker(_hub.node);
+                _mist_marker = __MistriaCompanion_create_mist_marker(_hub.node, _runtime.map_menu.map);
                 _hub.node.board_set("mistria_item_details_mist_marker", _mist_marker);
             }
             _mist_marker.board_get("label").set_text("Mist Spot");
@@ -3111,7 +3393,7 @@ function __MistriaCompanion_universal_gift_text(_item) {
     return _eligible > 0 ? _summary : "";
 }
 
-function __MistriaCompanion_cooking_base_text(_text, _details) {
+function __MistriaCompanion_cooking_base_text(_text, _details, _warn=true) {
     var _extra = __MistriaCompanion_details_text(_details);
     if (_extra == "") return _text;
     if (_text == _extra) return "";
@@ -3120,8 +3402,10 @@ function __MistriaCompanion_cooking_base_text(_text, _details) {
     if (_length >= 0 && string_copy(_text, _length + 1, string_length(_suffix)) == _suffix) {
         return string_copy(_text, 1, _length);
     }
-    mmapi_warn_rate_limited("mistria_item_details:cooking_description", "mistria_item_details",
-        "Cooking description changed outside the companion; preserving it as the description preview.");
+    if (_warn) {
+        mmapi_warn_rate_limited("mistria_item_details:cooking_description", "mistria_item_details",
+            "Cooking description changed outside the companion; preserving it as the description preview.");
+    }
     return _text;
 }
 
@@ -3194,10 +3478,24 @@ function __MistriaCompanion_clear_cooking_details(_body, _restore=true) {
         if (!_restore) return;
         ANCHOR.free_node(_state.button);
     }
+    if (_body.set_text == _state.wrapper) _body.set_text = _state.original_set_text;
     if (_body.get_text() == _state.base_text) {
         _body.set_text(_state.source_text);
     }
     _body.board_set("mistria_item_details_cooking", undefined);
+}
+
+function __MistriaCompanion_cooking_description_set(_text) {
+    if (!is_string(_text) || self.menu.context != RecipeContext.Cooking || self.menu.description != self.body
+        || self.menu.close_requested || self.menu.free_requested)
+    {
+        return self.original_set_text(_text);
+    }
+    self.source_text = _text;
+    var _details = self.menu.item == undefined ? undefined : __MistriaCompanion_for_item(self.menu.item);
+    self.base_text = _details == undefined ? _text : __MistriaCompanion_cooking_base_text(_text, _details, false);
+    self.item = self.menu.item;
+    return self.original_set_text(self.base_text);
 }
 
 function __MistriaCompanion_update_cooking_details(_menu, _details) {
@@ -3205,9 +3503,17 @@ function __MistriaCompanion_update_cooking_details(_menu, _details) {
     __MistriaCompanion_clear_gift_highlights(_body);
     var _state = _body.board_get("mistria_item_details_cooking");
     if (_state == undefined) {
+        if (typeof(__MistriaCompanion_field(_body, "set_text")) != "method") {
+            mmapi_warn_rate_limited("mistria_item_details:cooking_setter", "mistria_item_details",
+                "Cooking description updates are unavailable; leaving the native description unchanged.");
+            return;
+        }
         _state = {
-            source_text: undefined, base_text: undefined, item: undefined
+            source_text: undefined, base_text: undefined, item: undefined,
+            menu: _menu, body: _body, original_set_text: _body.set_text
         };
+        _state.wrapper = method(_state, __MistriaCompanion_cooking_description_set);
+        _body.set_text = _state.wrapper;
         _state.button = ANCHOR.nine_slice(_body.parent)
             .set_sprites_from_key("spr_ui_button")
             .set_size(40, 18).set_align(Align.RightOut, Align.TopIn).set_xy(4, 0)
@@ -3218,9 +3524,7 @@ function __MistriaCompanion_update_cooking_details(_menu, _details) {
     }
     var _text = _body.get_text();
     if (_state.item != _menu.item || _text != _state.base_text) {
-        _state.source_text = _text;
-        _state.base_text = __MistriaCompanion_cooking_base_text(_text, _details);
-        _body.set_text(_state.base_text);
+        _body.set_text(_text);
     }
     _state.item = _menu.item;
     _state.button.enable();
@@ -3364,6 +3668,7 @@ function MistriaCompanion_tick() {
     }
     if (_runtime.dig_spot_delay >= 0) MistriaCompanion_detect_dig_spots();
     MistriaCompanion_show_dig_spot_notice();
+    MistriaCompanion_detect_diving_spots();
     MistriaCompanion_update_birthday_label();
 
     var _hubs = __MistriaCompanion_map_hubs();
@@ -3396,5 +3701,5 @@ function MistriaCompanion_register() {
     mmapi_register(MistriaCompanion_tick);
 }
 
-mmapi_mod_declare("mistria_item_details", "1.0.49");
+mmapi_mod_declare("mistria_item_details", "1.0.50");
 MistriaCompanion_register();
